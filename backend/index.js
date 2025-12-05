@@ -22,7 +22,7 @@ const corsOptions = FRONTEND_ORIGIN
   : {}; // allow all if not set
 
 app.use(cors(corsOptions));
-app.use(bodyParser.json());
+app.use(express.json());
 
 // Environment variables (from .env)
 const PORT = process.env.PORT || 3000;
@@ -78,6 +78,10 @@ function mapRowToUser(row) {
     createdAt: row.created_at ?? null
   };
 }
+app.post('/api/user-debug', (req, res) => {
+  console.log('DEBUG /api/user-debug body:', req.body);
+  res.json({ body: req.body });
+});
 
 /**
  * POST /api/user
