@@ -2,10 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+
     <title>CEO TOTO Tycoon</title>
+
+    <!-- Telegram SDK -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <!-- Tailwind via CDN (fine for dev, Vercel builds fine) -->
     <script src="https://cdn.tailwindcss.com"></script>
+
     <style>
       body {
         background-color: #0f172a; /* slate-900 */
@@ -14,17 +21,19 @@
         user-select: none;
         -webkit-tap-highlight-color: transparent;
       }
-      /* Custom Scrollbar for sleek look */
+
+      /* Custom Scrollbar */
       ::-webkit-scrollbar {
         width: 6px;
       }
       ::-webkit-scrollbar-track {
-        background: #1e293b; 
+        background: #1e293b;
       }
       ::-webkit-scrollbar-thumb {
-        background: #475569; 
+        background: #475569;
         border-radius: 3px;
       }
+
       .animate-bounce-short {
         animation: bounce-short 0.3s infinite alternate;
       }
@@ -33,20 +42,12 @@
         to { transform: translateY(-5px); }
       }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
-</head>
+  </head>
+
   <body>
     <div id="root"></div>
-  <script type="module" src="/index.tsx"></script>
-</body>
+
+    <!-- Vite entry point -->
+    <script type="module" src="/index.tsx"></script>
+  </body>
 </html>

@@ -15,11 +15,29 @@ dotenv.config();
 
 const app = express();
 
-// CORS: allow specific frontend origin if provided (safer), otherwise allow all
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '';
-const corsOptions = FRONTEND_ORIGIN
-  ? { origin: FRONTEND_ORIGIN, optionsSuccessStatus: 200 }
-  : {}; // allow all if not set
+// --- CORS setup (replace existing block) ---
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || ''; // e.g. https://ceo-toto-tycoon.vercel.app
+
+// Build allowed origins: include production origin (if set) and localhost for dev
+const allowedOrigins = [];
+if (FRONTEND_ORIGIN) allowedOrigins.push(FRONTEND_ORIGIN);
+// local dev origin used by Vite
+allowedOrigins.push('http://localhost:5173');
+
+// CORS options that allow same-origin requests and requests from allowedOrigins
+const corsOptions = {
+  origin: function(origin, callback) {
+    // allow requests with no origin (curl, mobile apps, server-to-server)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`;
+    return callback(new Error(msg), false);
+  },
+  credentials: true,
+  optionsSuccessStatus: 200
+};
 
 app.use(cors(corsOptions));
 app.use(express.json());
@@ -119,13 +137,13 @@ app.post('/api/user', async (req, res) => {
       subscribed: false,
     };
 
-    const { data: created, error: insertErr } = await supabase
+    const { data: created, error: upsertErr } = await supabase
       .from('users')
-      .insert([newUser])
+      .upsert(newUser, { onConflict: 'id' })
       .select()
       .single();
 
-    if (insertErr) throw insertErr;
+    if (upsertErr) throw upsertErr;
     return res.json({ user: mapRowToUser(created) });
   } catch (err) {
     console.error('/api/user error', err);
