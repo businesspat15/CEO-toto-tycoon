@@ -1,4 +1,5 @@
-import React from 'react';
+// frontend/views/LeaderboardView.tsx
+import React, { useEffect, useState } from 'react';
 import { UserState } from '../types';
 import { formatNumber } from '../constants';
 
@@ -6,11 +7,51 @@ interface LeaderboardViewProps {
   user: UserState;
 }
 
-const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
-  // Combine mock data with current user and sort
-  const allUsers = [{ username: user.username, coins: user.coins }];
+type ApiUser = {
+  id: string;
+  username: string;
+  coins: number;
+  businesses?: Record<string, number>;
+  level?: number;
+};
 
-  const userRank = 1;
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:3000';
+
+const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
+  const [users, setUsers] = useState<ApiUser[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let aborted = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`${API_BASE}/api/leaderboard?limit=50`, {
+          credentials: 'include'
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.json();
+        if (!aborted) setUsers(body.users || []);
+      } catch (err: any) {
+        if (!aborted) setError(err?.message || 'Failed to load');
+      } finally {
+        if (!aborted) setLoading(false);
+      }
+    }
+    load();
+    // optional: poll every 10s to keep leaderboard fresh
+    const timer = setInterval(load, 10000);
+    return () => {
+      aborted = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  // Compute rank of current user in the fetched list
+  const userIndex = users.findIndex(u => u.id === user.id || u.username === user.username);
+  const userRank = userIndex >= 0 ? userIndex + 1 : users.length + 1;
 
   return (
     <div className="h-full px-4 pt-8 pb-24 overflow-y-auto bg-slate-900">
@@ -31,22 +72,52 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
               <span className="text-xs text-lime-400">{formatNumber(user.coins)} coins</span>
             </div>
           </div>
+          <div>
+            <button
+              onClick={() => {
+                // immediate refresh
+                (async () => {
+                  try {
+                    const res = await fetch(`${API_BASE}/api/leaderboard?limit=50`, { credentials: 'include' });
+                    const body = await res.json();
+                    setUsers(body.users || []);
+                  } catch (e) {
+                    console.warn(e);
+                  }
+                })();
+              }}
+              className="text-xs px-3 py-1 rounded bg-slate-700 text-slate-200 hover:bg-slate-600"
+            >
+              Refresh
+            </button>
+          </div>
         </div>
 
         {/* List */}
         <div className="divide-y divide-slate-700/50">
-          {allUsers.map((u, idx) => {
+          {loading && (
+            <div className="p-4 text-slate-400">Loading...</div>
+          )}
+          {error && (
+            <div className="p-4 text-red-400">Error: {error}</div>
+          )}
+
+          {!loading && users.length === 0 && !error && (
+            <div className="p-4 text-slate-400">No players yet.</div>
+          )}
+
+          {users.map((u, idx) => {
             const rank = idx + 1;
-            const isMe = u.username === user.username;
-            
+            const isMe = u.id === user.id || u.username === user.username;
+
             let medal = null;
             if (rank === 1) medal = '🥇';
             if (rank === 2) medal = '🥈';
             if (rank === 3) medal = '🥉';
 
             return (
-              <div 
-                key={`${u.username}-${idx}`} 
+              <div
+                key={`${u.id}-${idx}`}
                 className={`flex items-center justify-between p-4 ${isMe ? 'bg-white/5' : ''}`}
               >
                 <div className="flex items-center gap-4">
@@ -57,6 +128,11 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
                     <span className={`font-medium ${isMe ? 'text-lime-400' : 'text-slate-200'}`}>
                       {u.username}
                     </span>
+                    {u.businesses && (
+                      <span className="text-xs text-slate-500">
+                        {Object.entries(u.businesses).map(([k,v]) => `${k}:${v}`).join(' • ')}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="text-right">
