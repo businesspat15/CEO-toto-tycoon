@@ -21,6 +21,7 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Fetch leaderboard from backend
   useEffect(() => {
     let aborted = false;
     async function load() {
@@ -32,20 +33,33 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = await res.json();
-        if (!aborted) setUsers(body.users || []);
+        if (!aborted) {
+          let fetchedUsers: ApiUser[] = body.users || [];
+
+          // Include current user if missing
+          if (!fetchedUsers.find(u => u.id === user.id || u.username === user.username)) {
+            fetchedUsers.push({ id: user.id, username: user.username, coins: user.coins });
+          }
+
+          // Sort descending by coins
+          fetchedUsers.sort((a, b) => b.coins - a.coins);
+
+          setUsers(fetchedUsers);
+        }
       } catch (err: any) {
         if (!aborted) setError(err?.message || 'Failed to load');
       } finally {
         if (!aborted) setLoading(false);
       }
     }
+
     load();
-    const timer = setInterval(load, 10000);
+    const timer = setInterval(load, 10000); // refresh every 10s
     return () => {
       aborted = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [user]);
 
   const userIndex = users.findIndex(u => u.id === user.id || u.username === user.username);
   const userRank = userIndex >= 0 ? userIndex + 1 : users.length + 1;
@@ -75,7 +89,12 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
                   try {
                     const res = await fetch(`${API_BASE}/api/leaderboard?limit=50`, { credentials: 'include' });
                     const body = await res.json();
-                    setUsers(body.users || []);
+                    let fetchedUsers: ApiUser[] = body.users || [];
+                    if (!fetchedUsers.find(u => u.id === user.id || u.username === user.username)) {
+                      fetchedUsers.push({ id: user.id, username: user.username, coins: user.coins });
+                    }
+                    fetchedUsers.sort((a, b) => b.coins - a.coins);
+                    setUsers(fetchedUsers);
                   } catch (e) {
                     console.warn(e);
                   }
@@ -89,16 +108,9 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
         </div>
 
         <div className="divide-y divide-slate-700/50">
-          {loading && (
-            <div className="p-4 text-slate-400">Loading...</div>
-          )}
-          {error && (
-            <div className="p-4 text-red-400">Error: {error}</div>
-          )}
-
-          {!loading && users.length === 0 && !error && (
-            <div className="p-4 text-slate-400">No players yet.</div>
-          )}
+          {loading && <div className="p-4 text-slate-400">Loading...</div>}
+          {error && <div className="p-4 text-red-400">Error: {error}</div>}
+          {!loading && users.length === 0 && !error && <div className="p-4 text-slate-400">No players yet.</div>}
 
           {users.map((u, idx) => {
             const rank = idx + 1;
@@ -110,18 +122,11 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
             if (rank === 3) medal = '🥉';
 
             return (
-              <div
-                key={`${u.id}-${idx}`}
-                className={`flex items-center justify-between p-4 ${isMe ? 'bg-white/5' : ''}`}
-              >
+              <div key={`${u.id}-${idx}`} className={`flex items-center justify-between p-4 ${isMe ? 'bg-white/5' : ''}`}>
                 <div className="flex items-center gap-4">
-                  <div className="w-6 text-center font-mono text-slate-500 font-bold">
-                    {medal || rank}
-                  </div>
+                  <div className="w-6 text-center font-mono text-slate-500 font-bold">{medal || rank}</div>
                   <div className="flex flex-col">
-                    <span className={`font-medium ${isMe ? 'text-lime-400' : 'text-slate-200'}`}>
-                      {u.username}
-                    </span>
+                    <span className={`font-medium ${isMe ? 'text-lime-400' : 'text-slate-200'}`}>{u.username}</span>
                     {u.businesses && (
                       <span className="text-xs text-slate-500">
                         {Object.entries(u.businesses).map(([k,v]) => `${k}:${v}`).join(' • ')}
@@ -130,9 +135,7 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
                   </div>
                 </div>
                 <div className="text-right">
-                  <span className="text-slate-300 font-mono text-sm tracking-wide">
-                    {formatNumber(u.coins)}
-                  </span>
+                  <span className="text-slate-300 font-mono text-sm tracking-wide">{formatNumber(u.coins)}</span>
                 </div>
               </div>
             );
