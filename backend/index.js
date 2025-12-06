@@ -365,6 +365,36 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
   }
 });
 
+/**
+ * GET /api/leaderboard
+ * Returns top players ordered by coins (desc).
+ * Query params:
+ *   ?limit=20   -> number of rows to return (default 20)
+ */
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    const limit = Math.min(100, parseInt(req.query.limit || '20', 10) || 20);
+
+    // Select fields we need; adjust if your table uses different column names
+    const { data, error } = await supabase
+      .from('users')
+      .select('id, username, coins, businesses, level, referrals_count, created_at')
+      .order('coins', { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+
+    // Map rows to API-friendly shape (reuse helper)
+    const users = (data || []).map(mapRowToUser);
+
+    return res.json({ users });
+  } catch (err) {
+    console.error('/api/leaderboard', err);
+    return res.status(500).json({ error: err?.message || 'server error' });
+  }
+});
+
+
 // Health
 app.get('/health', (req, res) => res.json({ ok: true }));
 
