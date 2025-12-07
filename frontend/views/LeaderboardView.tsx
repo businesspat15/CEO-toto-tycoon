@@ -14,7 +14,8 @@ type ApiUser = {
   level?: number;
 };
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:3000';
+const API_BASE = ((import.meta as any).env?.VITE_API_URL || '').replace(/\/$/, '') || 'https://ceo-toto-tycoon.onrender.com';
+
 
 const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
   const [users, setUsers] = useState<ApiUser[]>([]);
