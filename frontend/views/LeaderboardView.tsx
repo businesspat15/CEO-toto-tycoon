@@ -128,11 +128,7 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
                   <div className="w-6 text-center font-mono text-slate-500 font-bold">{medal || rank}</div>
                   <div className="flex flex-col">
                     <span className={`font-medium ${isMe ? 'text-lime-400' : 'text-slate-200'}`}>{u.username}</span>
-                    {u.businesses && (
-                      <span className="text-xs text-slate-500">
-                        {Object.entries(u.businesses).map(([k,v]) => `${k}:${v}`).join(' • ')}
-                      </span>
-                    )}
+                   
                   </div>
                 </div>
                 <div className="text-right">
