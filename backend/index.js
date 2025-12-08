@@ -116,30 +116,98 @@ app.post('/api/user-debug', (req, res) => {
 });
 
 /**
+ * Helper: applyReferralBonus(referrerId)
+ * - tries RPC increment_referral_bonus first
+ * - falls back to a safe JS update if RPC missing/blocked
+ */
+async function applyReferralBonus(referrerId) {
+  if (!referrerId) return { ok: false, reason: 'no-referrer' };
+
+  try {
+    // Ensure referrer exists and fetch current counts
+    const { data: refRow, error: selErr } = await supabase
+      .from('users')
+      .select('id, referrals_count, coins')
+      .eq('id', referrerId)
+      .maybeSingle();
+
+    if (selErr) {
+      console.warn('applyReferralBonus: select error', selErr);
+      return { ok: false, reason: 'select-error', error: selErr };
+    }
+    if (!refRow) {
+      return { ok: false, reason: 'referrer-not-found' };
+    }
+
+    // Try RPC first (preferred)
+    try {
+      await supabase.rpc('increment_referral_bonus', { ref_id: referrerId });
+      return { ok: true, method: 'rpc' };
+    } catch (rpcErr) {
+      // RPC failed -> fallback to update
+      console.warn('applyReferralBonus: rpc failed, falling back to update', rpcErr?.message || rpcErr);
+
+      // Parse coins safely (supabase may return string for bigint)
+      const currentCoins = Number(refRow.coins || 0);
+      const currentCount = Number(refRow.referrals_count || 0);
+      const newCoins = currentCoins + 100;
+      const newCount = currentCount + 1;
+
+      const { error: updErr } = await supabase
+        .from('users')
+        .update({
+          referrals_count: newCount,
+          coins: newCoins
+        })
+        .eq('id', referrerId);
+
+      if (updErr) {
+        console.error('applyReferralBonus: fallback update failed', updErr);
+        return { ok: false, reason: 'fallback-update-failed', error: updErr };
+      }
+      return { ok: true, method: 'fallback-update' };
+    }
+  } catch (err) {
+    console.error('applyReferralBonus: unexpected error', err);
+    return { ok: false, reason: 'unexpected', error: err };
+  }
+}
+
+/**
  * POST /api/user
- * Body: { id, username }
- * Fetch existing user or create a new one.
+ * Body: { id, username, referredBy? }
+ * Fetch existing user or create a new one. If referredBy provided, credit referrer.
  */
 app.post('/api/user', async (req, res) => {
   try {
-    const { id, username } = req.body;
+    const { id, username, referredBy } = req.body;
     if (!id) return res.status(400).json({ error: 'id required' });
 
-    // Try fetch
+    // 1) See if user already exists (do NOT overwrite referred_by on existing users)
     const { data: existing, error: selectErr } = await supabase
       .from('users')
       .select('*')
       .eq('id', id)
       .maybeSingle();
 
-    if (selectErr) throw selectErr;
+    if (selectErr) {
+      console.error('/api/user select err', selectErr);
+      return res.status(500).json({ error: selectErr.message || 'db error' });
+    }
 
     if (existing) {
+      // user exists — return mapped user (no changes)
       return res.json({ user: mapRowToUser(existing) });
     }
 
-    // Create new user
-    const newUser = {
+    // Prevent self-referral
+    let safeReferredBy = referredBy && referredBy.toString() !== id.toString() ? referredBy.toString() : null;
+    if (referredBy && !safeReferredBy) {
+      console.warn('/api/user: attempted self-referral or invalid referredBy; ignoring referredBy');
+    }
+
+    // Insert new user (do not use upsert to avoid accidentally overwriting older fields)
+    const insertPayload = {
       id,
       username: username || `user_${id}`,
       coins: 100,
@@ -147,17 +215,30 @@ app.post('/api/user', async (req, res) => {
       level: 1,
       last_mine: 0,
       referrals_count: 0,
-      referred_by: null,
+      referred_by: safeReferredBy,
       subscribed: false,
     };
 
-    const { data: created, error: upsertErr } = await supabase
+    const { data: created, error: insertErr } = await supabase
       .from('users')
-      .upsert(newUser, { onConflict: 'id' })
+      .insert([insertPayload])
       .select()
       .single();
 
-    if (upsertErr) throw upsertErr;
+    if (insertErr) {
+      console.error('/api/user insert error', insertErr);
+      return res.status(500).json({ error: insertErr.message || 'insert error' });
+    }
+
+    // If referredBy was provided (and wasn't self-referral), try to credit the referrer
+    if (safeReferredBy) {
+      const applied = await applyReferralBonus(safeReferredBy);
+      if (!applied.ok) {
+        // log but don't fail creation
+        console.warn('/api/user: failed to apply referral bonus', applied);
+      }
+    }
+
     return res.json({ user: mapRowToUser(created) });
   } catch (err) {
     console.error('/api/user error', err);
@@ -293,66 +374,62 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
 
     const text = (msg.text || '').trim();
     const from = msg.from || {};
-    const tgId = from.id?.toString();
+    const tgId = from.id ? from.id.toString() : null;
+    if (!tgId) return res.sendStatus(204);
 
     // If user started with referral
     if (text && text.startsWith('/start')) {
-      const parts = text.split(' ');
+      const parts = text.split(' ').filter(Boolean);
+      let referrerId = null;
       if (parts[1] && parts[1].startsWith('ref_')) {
-        const referrerId = parts[1].replace('ref_', '');
-        // create the new user if not exists and increment referrer count
-        if (tgId) {
-          const username = from.username || `${from.first_name || 'tg'}_${tgId}`;
+        referrerId = parts[1].replace('ref_', '').trim();
+      }
 
-          const { data: existing } = await supabase
-            .from('users')
-            .select('id')
-            .eq('id', tgId)
-            .maybeSingle();
+      // create the new user if not exists and increment referrer count
+      const { data: existing, error: selErr } = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', tgId)
+        .maybeSingle();
 
-          if (!existing) {
-            await supabase.from('users').insert([{
-              id: tgId,
-              username,
-              coins: 100,
-              businesses: {},
-              level: 1,
-              last_mine: 0,
-              referrals_count: 0,
-              referred_by: referrerId,
-              subscribed: false
-            }]);
+      if (selErr) {
+        console.error('telegram webhook: select error', selErr);
+        // return 200 so Telegram doesn't retry too aggressively
+        return res.status(200).json({ ok: false, error: selErr.message || 'db error' });
+      }
 
-            // Try to increment referrer via stored function (optional). Catch errors so webhook isn't broken.
-            try {
-              await supabase.rpc('increment_referral_bonus', { ref_id: referrerId });
-            } catch (rpcErr) {
-              console.warn('increment_referral_bonus RPC failed', rpcErr?.message || rpcErr);
-            }
-          }
+      if (!existing) {
+        // Prevent self-referral
+        if (referrerId && referrerId === tgId) {
+          console.warn('telegram webhook: self-referral attempt; ignoring referred id');
+          referrerId = null;
         }
-      } else {
-        // normal start without referral: create user if not exists
-        if (tgId) {
-          const username = from.username || `${from.first_name || 'tg'}_${tgId}`;
-          const { data: existing } = await supabase
-            .from('users')
-            .select('id')
-            .eq('id', tgId)
-            .maybeSingle();
 
-          if (!existing) {
-            await supabase.from('users').insert([{
-              id: tgId,
-              username,
-              coins: 100,
-              businesses: {},
-              level: 1,
-              last_mine: 0,
-              referrals_count: 0,
-              referred_by: null,
-              subscribed: false
-            }]);
+        const username = from.username || `${from.first_name || 'tg'}_${tgId}`;
+        const insertPayload = {
+          id: tgId,
+          username,
+          coins: 100,
+          businesses: {},
+          level: 1,
+          last_mine: 0,
+          referrals_count: 0,
+          referred_by: referrerId || null,
+          subscribed: false
+        };
+
+        try {
+          await supabase.from('users').insert([insertPayload]);
+        } catch (insertErr) {
+          console.error('telegram webhook: insert failed', insertErr);
+          return res.status(200).json({ ok: false, error: insertErr.message || 'insert error' });
+        }
+
+        // Try to credit the referrer (best-effort)
+        if (referrerId) {
+          const applied = await applyReferralBonus(referrerId);
+          if (!applied.ok) {
+            console.warn('telegram webhook: failed to apply referral bonus', applied);
           }
         }
       }
@@ -384,8 +461,6 @@ app.get('/api/leaderboard', async (req, res) => {
     return res.status(500).json({ error: err?.message || 'server error' });
   }
 });
-
-
 
 // Health
 app.get('/health', (req, res) => res.json({ ok: true }));
