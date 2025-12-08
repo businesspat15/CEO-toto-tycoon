@@ -3,10 +3,9 @@
 // - Handles user fetch/create
 // - Mining endpoint with cooldown and passive income
 // - Basic Telegram webhook for /start referrals
-// - Uses Supabase server key for DB writes
+// - Uses Supabase service_role key for DB writes
 
 import express from 'express';
-import bodyParser from 'body-parser';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
@@ -59,7 +58,7 @@ app.use(express.json());
 // Environment variables (from .env)
 const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; // server secret
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; // server-only service_role key
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_SECRET_PATH = process.env.TELEGRAM_SECRET_PATH || ''; // optional for webhook path security
 
@@ -110,66 +109,99 @@ function mapRowToUser(row) {
     createdAt: row.created_at ?? null
   };
 }
+
 app.post('/api/user-debug', (req, res) => {
   console.log('DEBUG /api/user-debug body:', req.body);
   res.json({ body: req.body });
 });
 
 /**
- * Helper: applyReferralBonus(referrerId)
+ * applyReferralBonus (verbose/debug)
  * - tries RPC increment_referral_bonus first
  * - falls back to a safe JS update if RPC missing/blocked
+ * Returns { ok: boolean, method?: 'rpc'|'fallback-update', debug: {...} }
  */
 async function applyReferralBonus(referrerId) {
-  if (!referrerId) return { ok: false, reason: 'no-referrer' };
+  const debug = { startedAt: new Date().toISOString(), referrerId: referrerId ?? null };
+  if (!referrerId) {
+    debug.reason = 'no-referrer-provided';
+    console.warn('applyReferralBonus debug:', debug);
+    return { ok: false, debug };
+  }
 
   try {
-    // Ensure referrer exists and fetch current counts
+    // 1) Fetch current referrer row
     const { data: refRow, error: selErr } = await supabase
       .from('users')
       .select('id, referrals_count, coins')
       .eq('id', referrerId)
       .maybeSingle();
 
+    debug.fetchedRefRow = refRow ?? null;
     if (selErr) {
-      console.warn('applyReferralBonus: select error', selErr);
-      return { ok: false, reason: 'select-error', error: selErr };
+      debug.selectError = selErr;
+      console.warn('applyReferralBonus select error:', selErr, debug);
+      return { ok: false, debug };
     }
+
     if (!refRow) {
-      return { ok: false, reason: 'referrer-not-found' };
+      debug.reason = 'referrer-not-found';
+      console.warn('applyReferralBonus: referrer not found', debug);
+      return { ok: false, debug };
     }
 
-    // Try RPC first (preferred)
+    // 2) Try RPC (preferred)
     try {
-      await supabase.rpc('increment_referral_bonus', { ref_id: referrerId });
-      return { ok: true, method: 'rpc' };
-    } catch (rpcErr) {
-      // RPC failed -> fallback to update
-      console.warn('applyReferralBonus: rpc failed, falling back to update', rpcErr?.message || rpcErr);
+      const rpcStart = Date.now();
+      // supabase.rpc can return { data, error } or throw depending on client version; handle both
+      const rpcRes = await supabase.rpc('increment_referral_bonus', { ref_id: referrerId });
+      debug.rpc = { elapsedMs: Date.now() - rpcStart, result: rpcRes ?? null };
+      console.log('applyReferralBonus: RPC attempt result', debug.rpc);
 
-      // Parse coins safely (supabase may return string for bigint)
-      const currentCoins = Number(refRow.coins || 0);
-      const currentCount = Number(refRow.referrals_count || 0);
-      const newCoins = currentCoins + 100;
-      const newCount = currentCount + 1;
-
-      const { error: updErr } = await supabase
-        .from('users')
-        .update({
-          referrals_count: newCount,
-          coins: newCoins
-        })
-        .eq('id', referrerId);
-
-      if (updErr) {
-        console.error('applyReferralBonus: fallback update failed', updErr);
-        return { ok: false, reason: 'fallback-update-failed', error: updErr };
+      // If rpc returned an error object structure, surface it
+      if (rpcRes && rpcRes.error) {
+        debug.rpcError = rpcRes.error;
+        console.warn('applyReferralBonus: rpc returned error object, falling back', debug);
+      } else {
+        // Success (RPC may return null data but still be successful)
+        return { ok: true, method: 'rpc', debug };
       }
-      return { ok: true, method: 'fallback-update' };
+    } catch (rpcErr) {
+      debug.rpcError = rpcErr?.message || rpcErr;
+      console.warn('applyReferralBonus: rpc failed, falling back', debug);
+      // continue to fallback
     }
+
+    // 3) Fallback: update row in JS
+    const currentCoins = Number(refRow.coins || 0);
+    const currentCount = Number(refRow.referrals_count || 0);
+    const newCoins = currentCoins + 100;
+    const newCount = currentCount + 1;
+
+    const fallbackStart = Date.now();
+    const { error: updErr } = await supabase
+      .from('users')
+      .update({
+        referrals_count: newCount,
+        coins: newCoins
+      })
+      .eq('id', referrerId);
+
+    debug.fallback = { elapsedMs: Date.now() - fallbackStart, newCoins, newCount };
+
+    if (updErr) {
+      debug.fallbackError = updErr;
+      console.error('applyReferralBonus: fallback update failed', debug);
+      return { ok: false, debug };
+    }
+
+    console.log('applyReferralBonus: fallback update succeeded', debug);
+    return { ok: true, method: 'fallback-update', debug };
+
   } catch (err) {
-    console.error('applyReferralBonus: unexpected error', err);
-    return { ok: false, reason: 'unexpected', error: err };
+    debug.unexpectedError = err?.message || err;
+    console.error('applyReferralBonus: unexpected error', debug);
+    return { ok: false, debug };
   }
 }
 
@@ -230,16 +262,27 @@ app.post('/api/user', async (req, res) => {
       return res.status(500).json({ error: insertErr.message || 'insert error' });
     }
 
-    // If referredBy was provided (and wasn't self-referral), try to credit the referrer
+    // If referredBy was provided (and wasn't self-referral), try to credit the referrer (single call)
+    let appliedResult = null;
     if (safeReferredBy) {
-      const applied = await applyReferralBonus(safeReferredBy);
-      if (!applied.ok) {
+      appliedResult = await applyReferralBonus(safeReferredBy);
+      if (!appliedResult.ok) {
         // log but don't fail creation
-        console.warn('/api/user: failed to apply referral bonus', applied);
+        console.warn('/api/user: failed to apply referral bonus', appliedResult);
+      } else {
+        console.log('/api/user: referral bonus applied', appliedResult);
       }
     }
 
-    return res.json({ user: mapRowToUser(created) });
+    // return user + debug info (useful while troubleshooting)
+    return res.json({
+      user: mapRowToUser(created),
+      debug: {
+        referredBy: safeReferredBy,
+        applyReferralResult: appliedResult
+      }
+    });
+
   } catch (err) {
     console.error('/api/user error', err);
     return res.status(500).json({ error: err?.message || 'server error' });
@@ -394,7 +437,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
 
       if (selErr) {
         console.error('telegram webhook: select error', selErr);
-        // return 200 so Telegram doesn't retry too aggressively
+        // return 200 so Telegram doesn't keep retrying too aggressively
         return res.status(200).json({ ok: false, error: selErr.message || 'db error' });
       }
 
@@ -430,6 +473,8 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           const applied = await applyReferralBonus(referrerId);
           if (!applied.ok) {
             console.warn('telegram webhook: failed to apply referral bonus', applied);
+          } else {
+            console.log('telegram webhook: referral bonus applied', applied);
           }
         }
       }
@@ -459,6 +504,18 @@ app.get('/api/leaderboard', async (req, res) => {
   } catch (err) {
     console.error('/api/leaderboard', err);
     return res.status(500).json({ error: err?.message || 'server error' });
+  }
+});
+
+// Debug endpoint: force applyReferralBonus for testing
+app.get('/debug/referral', async (req, res) => {
+  try {
+    const referrerId = req.query.referrerId ? String(req.query.referrerId) : null;
+    const result = await applyReferralBonus(referrerId);
+    return res.json({ ok: result.ok, result });
+  } catch (err) {
+    console.error('/debug/referral error', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'server error' });
   }
 });
 
