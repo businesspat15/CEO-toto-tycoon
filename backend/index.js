@@ -121,16 +121,42 @@ app.post('/api/user-debug', (req, res) => {
  * - falls back to a safe JS update if RPC missing/blocked
  * Returns { ok: boolean, method?: 'rpc'|'fallback-update', debug: {...} }
  */
-async function applyReferralBonus(referrerId) {
-  const debug = { startedAt: new Date().toISOString(), referrerId: referrerId ?? null };
+// ---------- applyReferralBonus (idempotent, uses referrals table) ----------
+async function applyReferralBonus(referrerId, referredId = null) {
+  const debug = { startedAt: new Date().toISOString(), referrerId, referredId };
+
   if (!referrerId) {
     debug.reason = 'no-referrer-provided';
     console.warn('applyReferralBonus debug:', debug);
     return { ok: false, debug };
   }
 
+  if (!referredId) {
+    debug.reason = 'no-referred-id';
+    console.warn('applyReferralBonus debug:', debug);
+    return { ok: false, debug };
+  }
+
   try {
-    // 1) Fetch current referrer row
+    // Attempt to insert into referrals table (idempotent check)
+    const { error: refErr } = await supabase
+      .from('referrals')
+      .insert([{ referrer_id: referrerId, referred_id: referredId }]);
+
+    if (refErr) {
+      // unique violation = already applied
+      if (refErr.code === '23505') {
+        debug.reason = 'already-applied';
+        console.log('applyReferralBonus: already applied', debug);
+        return { ok: false, debug };
+      } else {
+        debug.insertError = refErr;
+        console.error('applyReferralBonus: insert failed', debug);
+        return { ok: false, debug };
+      }
+    }
+
+    // Fetch current referrer row
     const { data: refRow, error: selErr } = await supabase
       .from('users')
       .select('id, referrals_count, coins')
@@ -138,56 +164,32 @@ async function applyReferralBonus(referrerId) {
       .maybeSingle();
 
     debug.fetchedRefRow = refRow ?? null;
-    if (selErr) {
-      debug.selectError = selErr;
-      console.warn('applyReferralBonus select error:', selErr, debug);
+    if (selErr || !refRow) {
+      debug.reason = selErr ? selErr.message : 'referrer-not-found';
+      console.warn('applyReferralBonus: referrer fetch failed', debug);
       return { ok: false, debug };
     }
 
-    if (!refRow) {
-      debug.reason = 'referrer-not-found';
-      console.warn('applyReferralBonus: referrer not found', debug);
-      return { ok: false, debug };
-    }
-
-    // 2) Try RPC (preferred)
+    // Try RPC first
     try {
       const rpcStart = Date.now();
-      // supabase.rpc can return { data, error } or throw depending on client version; handle both
       const rpcRes = await supabase.rpc('increment_referral_bonus', { ref_id: referrerId });
       debug.rpc = { elapsedMs: Date.now() - rpcStart, result: rpcRes ?? null };
-      console.log('applyReferralBonus: RPC attempt result', debug.rpc);
-
-      // If rpc returned an error object structure, surface it
-      if (rpcRes && rpcRes.error) {
-        debug.rpcError = rpcRes.error;
-        console.warn('applyReferralBonus: rpc returned error object, falling back', debug);
-      } else {
-        // Success (RPC may return null data but still be successful)
-        return { ok: true, method: 'rpc', debug };
-      }
+      console.log('applyReferralBonus: RPC succeeded', debug);
+      return { ok: true, method: 'rpc', debug };
     } catch (rpcErr) {
       debug.rpcError = rpcErr?.message || rpcErr;
-      console.warn('applyReferralBonus: rpc failed, falling back', debug);
-      // continue to fallback
+      console.warn('applyReferralBonus: RPC failed, falling back', debug);
     }
 
-    // 3) Fallback: update row in JS
-    const currentCoins = Number(refRow.coins || 0);
-    const currentCount = Number(refRow.referrals_count || 0);
-    const newCoins = currentCoins + 100;
-    const newCount = currentCount + 1;
+    // Fallback JS update
+    const newCoins = (refRow.coins || 0) + 100;
+    const newCount = (refRow.referrals_count || 0) + 1;
 
-    const fallbackStart = Date.now();
     const { error: updErr } = await supabase
       .from('users')
-      .update({
-        referrals_count: newCount,
-        coins: newCoins
-      })
+      .update({ coins: newCoins, referrals_count: newCount })
       .eq('id', referrerId);
-
-    debug.fallback = { elapsedMs: Date.now() - fallbackStart, newCoins, newCount };
 
     if (updErr) {
       debug.fallbackError = updErr;
@@ -195,6 +197,7 @@ async function applyReferralBonus(referrerId) {
       return { ok: false, debug };
     }
 
+    debug.fallback = { newCoins, newCount };
     console.log('applyReferralBonus: fallback update succeeded', debug);
     return { ok: true, method: 'fallback-update', debug };
 
@@ -204,6 +207,7 @@ async function applyReferralBonus(referrerId) {
     return { ok: false, debug };
   }
 }
+
 
 /**
  * POST /api/user
