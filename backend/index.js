@@ -116,12 +116,11 @@ app.post('/api/user-debug', (req, res) => {
 });
 
 /**
- * applyReferralBonus (verbose/debug)
- * - tries RPC increment_referral_bonus first
- * - falls back to a safe JS update if RPC missing/blocked
- * Returns { ok: boolean, method?: 'rpc'|'fallback-update', debug: {...} }
+ * applyReferralBonus (idempotent, uses referrals table)
+ * - expects both referrerId and referredId
+ * - inserts into referrals table to prevent double-credit
+ * - tries RPC increment_referral_bonus first, then fallback update
  */
-// ---------- applyReferralBonus (idempotent, uses referrals table) ----------
 async function applyReferralBonus(referrerId, referredId = null) {
   const debug = { startedAt: new Date().toISOString(), referrerId, referredId };
 
@@ -138,22 +137,22 @@ async function applyReferralBonus(referrerId, referredId = null) {
   }
 
   try {
-    // Attempt to insert into referrals table (idempotent check)
+    // Insert into referrals table (idempotent). If duplicate, do not credit again.
     const { error: refErr } = await supabase
       .from('referrals')
       .insert([{ referrer_id: referrerId, referred_id: referredId }]);
 
     if (refErr) {
-      // unique violation = already applied
-      if (refErr.code === '23505') {
+      // Unique violation = already applied
+      const isDuplicate = refErr.code === '23505' || (refErr.message && refErr.message.toLowerCase().includes('duplicate'));
+      if (isDuplicate) {
         debug.reason = 'already-applied';
         console.log('applyReferralBonus: already applied', debug);
         return { ok: false, debug };
-      } else {
-        debug.insertError = refErr;
-        console.error('applyReferralBonus: insert failed', debug);
-        return { ok: false, debug };
       }
+      debug.insertError = refErr;
+      console.error('applyReferralBonus: insert failed', debug);
+      return { ok: false, debug };
     }
 
     // Fetch current referrer row
@@ -170,21 +169,30 @@ async function applyReferralBonus(referrerId, referredId = null) {
       return { ok: false, debug };
     }
 
-    // Try RPC first
+    // Try RPC first (preferred)
     try {
       const rpcStart = Date.now();
       const rpcRes = await supabase.rpc('increment_referral_bonus', { ref_id: referrerId });
       debug.rpc = { elapsedMs: Date.now() - rpcStart, result: rpcRes ?? null };
-      console.log('applyReferralBonus: RPC succeeded', debug);
-      return { ok: true, method: 'rpc', debug };
+
+      // If RPC returned an error object, treat as failure
+      if (rpcRes && rpcRes.error) {
+        debug.rpcError = rpcRes.error;
+        console.warn('applyReferralBonus: rpc returned error object, falling back', debug);
+      } else {
+        console.log('applyReferralBonus: RPC succeeded', debug);
+        return { ok: true, method: 'rpc', debug };
+      }
     } catch (rpcErr) {
       debug.rpcError = rpcErr?.message || rpcErr;
       console.warn('applyReferralBonus: RPC failed, falling back', debug);
     }
 
     // Fallback JS update
-    const newCoins = (refRow.coins || 0) + 100;
-    const newCount = (refRow.referrals_count || 0) + 1;
+    const currentCoins = Number(refRow.coins || 0);
+    const currentCount = Number(refRow.referrals_count || 0);
+    const newCoins = currentCoins + 100;
+    const newCount = currentCount + 1;
 
     const { error: updErr } = await supabase
       .from('users')
@@ -207,7 +215,6 @@ async function applyReferralBonus(referrerId, referredId = null) {
     return { ok: false, debug };
   }
 }
-
 
 /**
  * POST /api/user
@@ -266,10 +273,10 @@ app.post('/api/user', async (req, res) => {
       return res.status(500).json({ error: insertErr.message || 'insert error' });
     }
 
-    // If referredBy was provided (and wasn't self-referral), try to credit the referrer (single call)
+    // If referredBy was provided (and wasn't self-referral), try to credit the referrer (single call, pass referred id)
     let appliedResult = null;
     if (safeReferredBy) {
-      appliedResult = await applyReferralBonus(safeReferredBy);
+      appliedResult = await applyReferralBonus(safeReferredBy, id);
       if (!appliedResult.ok) {
         // log but don't fail creation
         console.warn('/api/user: failed to apply referral bonus', appliedResult);
@@ -472,9 +479,9 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           return res.status(200).json({ ok: false, error: insertErr.message || 'insert error' });
         }
 
-        // Try to credit the referrer (best-effort)
+        // Try to credit the referrer (best-effort) - pass both ids
         if (referrerId) {
-          const applied = await applyReferralBonus(referrerId);
+          const applied = await applyReferralBonus(referrerId, tgId);
           if (!applied.ok) {
             console.warn('telegram webhook: failed to apply referral bonus', applied);
           } else {
@@ -511,11 +518,12 @@ app.get('/api/leaderboard', async (req, res) => {
   }
 });
 
-// Debug endpoint: force applyReferralBonus for testing
+// Debug endpoint: force applyReferralBonus for testing (now accepts referredId)
 app.get('/debug/referral', async (req, res) => {
   try {
     const referrerId = req.query.referrerId ? String(req.query.referrerId) : null;
-    const result = await applyReferralBonus(referrerId);
+    const referredId = req.query.referredId ? String(req.query.referredId) : null;
+    const result = await applyReferralBonus(referrerId, referredId);
     return res.json({ ok: result.ok, result });
   } catch (err) {
     console.error('/debug/referral error', err);
