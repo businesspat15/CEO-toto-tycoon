@@ -1,6 +1,6 @@
--- schema.sql
--- Run in Supabase > SQL editor
-
+-- ============================================================
+-- STEP 1 — USERS TABLE  (Run only if not already created)
+-- ============================================================
 create table if not exists public.users (
   id text primary key,
   username text,
@@ -14,24 +14,28 @@ create table if not exists public.users (
   created_at timestamptz default now()
 );
 
--- Safer RPC: increment referrals_count and coins, and return the updated values.
--- This helps the server confirm the update when calling rpc().
+-- ============================================================
+-- STEP 2 — FIXED REFERRAL FUNCTION (RPC)
+-- RETURNS new referral count
+-- Also adds +100 coins to referrer (remove if you don’t want)
+-- ============================================================
 create or replace function public.increment_referral_bonus(ref_id text)
-returns table(referrals_count int, coins bigint)
-language plpgsql as $$
+returns table(new_count int)
+language plpgsql
+security definer
+as $$
 begin
   update public.users
-  set referrals_count = coalesce(referrals_count,0) + 1,
-      coins = coalesce(coins,0) + 100
+  set referrals_count = coalesce(referrals_count, 0) + 1,
+      coins = coalesce(coins, 0) + 100  -- delete this line if NO reward
   where id = ref_id
-  returning referrals_count, coins
-  into referrals_count, coins;
+  returning referrals_count into new_count;
 
-  if NOT FOUND then
-    -- No matching referrer row; return nothing (caller sees empty result)
-    return;
+  -- if no matching id found
+  if not found then
+    new_count := 0;
   end if;
 
-  return next;
+  return;
 end;
 $$;

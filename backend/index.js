@@ -279,59 +279,61 @@ app.post('/api/mine', async (req, res) => {
 });
 
 
-app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` : ''}`, async (req, res) => {
-  try {
-    console.log('[telegram webhook] headers:', req.headers);
-    console.log('[telegram webhook] raw body:', JSON.stringify(req.body).slice(0, 2000)); // log up to 2k chars
+app.post(
+  `/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` : ''}`,
+  async (req, res) => {
+    try {
+      console.log('[telegram webhook] headers:', req.headers);
+      console.log(
+        '[telegram webhook] raw body:',
+        JSON.stringify(req.body).slice(0, 2000)
+      );
 
-    const body = req.body;
-    if (!body) {
-      console.log('[telegram webhook] empty body => 204');
-      return res.sendStatus(204);
-    }
+      const body = req.body;
+      if (!body) return res.sendStatus(204);
 
-    const msg = body.message || body.edited_message;
-    if (!msg) {
-      console.log('[telegram webhook] no message/edited_message in update => 204');
-      return res.sendStatus(204);
-    }
+      const msg = body.message || body.edited_message;
+      if (!msg) return res.sendStatus(204);
 
-    const text = String(msg.text || '').trim();
-    const from = msg.from || {};
-    const tgId = from.id ? String(from.id) : null;
+      const text = String(msg.text || '').trim();
+      const from = msg.from || {};
+      const tgId = from.id ? String(from.id) : null;
 
-    console.log('[telegram webhook] text:', text, 'from:', tgId, 'username:', from.username);
+      console.log('[telegram webhook] text:', text, 'from:', tgId);
 
-    // If /start with referral code like "/start ref_<id>"
-    if (text && text.startsWith('/start')) {
-      const parts = text.split(/\s+/);
-      const maybeRef = parts[1] || null;
-      let referrerId = null;
-      if (maybeRef && maybeRef.startsWith('ref_')) {
-        referrerId = maybeRef.replace(/^ref_/, '');
-      }
+      // -------------------------
+      //  START COMMAND HANDLING
+      // -------------------------
+      if (text.startsWith('/start')) {
+        const parts = text.split(/\s+/);
+        const maybeRef = parts[1] || null;
+        let referrerId = null;
 
-      if (!tgId) {
-        console.warn('[telegram webhook] no tgId, cannot create user');
-        return res.json({ ok: true });
-      }
+        if (maybeRef && maybeRef.startsWith('ref_')) {
+          referrerId = maybeRef.replace(/^ref_/, '');
+          console.log('[referral detected] referrerId =', referrerId);
+        }
 
-      const username = from.username || `${from.first_name || 'tg'}_${tgId}`;
+        if (!tgId) {
+          console.warn('[telegram webhook] no tgId found');
+          return res.json({ ok: true });
+        }
 
-      // create user if not exists
-      const { data: existing, error: selectErr } = await supabase
-        .from('users')
-        .select('id')
-        .eq('id', tgId)
-        .maybeSingle();
+        const username =
+          from.username || `${from.first_name || 'tg'}_${tgId}`;
 
-      if (selectErr) {
-        console.warn('[telegram webhook] select user error', selectErr);
-        // continue - don't block webhook
-      }
+        // -----------------------------------
+        // Create user if not exists
+        // -----------------------------------
+        const { data: existing, error: selectErr } = await supabase
+          .from('users')
+          .select('id')
+          .eq('id', tgId)
+          .maybeSingle();
 
-      if (!existing) {
-        try {
+        if (selectErr) console.warn('select user error:', selectErr);
+
+        if (!existing) {
           const insertPayload = {
             id: tgId,
             username,
@@ -344,89 +346,83 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
             subscribed: false
           };
 
-          const { data: inserted, error: insertErr } = await supabase
+          const { error: insertErr } = await supabase
             .from('users')
-            .insert([insertPayload])
-            .select()
-            .single();
+            .insert([insertPayload]);
 
           if (insertErr) {
-            // if duplicate key error, swallow it (concurrent create)
-            console.warn('[telegram webhook] insert user error (may be duplicate)', insertErr?.message || insertErr);
+            console.warn(
+              '[insert user error] (possibly duplicate)',
+              insertErr.message
+            );
           } else {
-            console.log('[telegram webhook] user created:', inserted.id);
+            console.log('[user created]', tgId);
           }
-        } catch (e) {
-          console.warn('[telegram webhook] insert threw', e?.message || e);
+        } else {
+          console.log('[user exists]', tgId);
         }
-      } else {
-        console.log('[telegram webhook] user already exists', existing.id);
-      }
 
-      // If we have a referrerId, increment their referrals_count safely
-      if (referrerId) {
-        try {
-          // Try RPC first (preferred because it runs in DB atomically and returns the updated values)
+        // -----------------------------------
+        // Referral bonus (SQL RPC + fallback)
+        // -----------------------------------
+        if (referrerId) {
+          console.log('[referral bonus] Attempt RPC…');
+
           try {
-            const { data: rpcRes, error: rpcErr } = await supabase
-              .rpc('increment_referral_bonus', { ref_id: referrerId });
+            const { data: rpcRes, error: rpcErr } = await supabase.rpc(
+              'increment_referral_bonus',
+              { ref_id: referrerId }
+            );
 
             if (rpcErr) throw rpcErr;
 
-            // rpcRes should contain the returned row(s). Log them for debugging.
-            console.log('[telegram webhook] RPC increment_referral_bonus success', rpcRes);
-
-            // Optionally: if rpcRes is empty, warn
-            if (!rpcRes || (Array.isArray(rpcRes) && rpcRes.length === 0)) {
-              console.warn('[telegram webhook] RPC returned empty result (referrer may not exist):', referrerId);
-            }
+            console.log(
+              '[referral RPC success] new_count =',
+              rpcRes?.[0]?.new_count
+            );
           } catch (rpcEx) {
-            // Fallback: do a safe read-then-update. This is less ideal for concurrency,
-            // but gives a fallback path if rpc or function is missing.
-            console.warn('[telegram webhook] RPC failed, falling back to UPDATE. rpcErr:', rpcEx?.message || rpcEx);
+            console.warn(
+              '[referral RPC failed] Using fallback UPDATE.',
+              rpcEx.message
+            );
 
+            // read ref count
             const { data: refRow, error: refErr } = await supabase
               .from('users')
-              .select('referrals_count, coins')
+              .select('referrals_count')
               .eq('id', referrerId)
               .maybeSingle();
 
-            if (refErr) {
-              console.warn('[telegram webhook] fetching referrer row failed', refErr);
-            } else if (!refRow) {
-              console.warn('[telegram webhook] referrer not found (fallback):', referrerId);
+            if (!refRow || refErr) {
+              console.warn('fallback: referrer not found');
             } else {
-              const nextCount = (refRow.referrals_count || 0) + 1;
-              const nextCoins = (refRow.coins || 0) + 100;
+              const next = (refRow.referrals_count || 0) + 1;
 
               const { error: updErr } = await supabase
                 .from('users')
-                .update({ referrals_count: nextCount, coins: nextCoins })
+                .update({ referrals_count: next })
                 .eq('id', referrerId);
 
-              if (updErr) {
-                console.warn('[telegram webhook] fallback update failed', updErr);
-              } else {
-                console.log('[telegram webhook] fallback incremented referrals_count for', referrerId, '->', nextCount, 'coins->', nextCoins);
-              }
+              if (updErr)
+                console.warn('fallback UPDATE failed:', updErr.message);
+              else console.log('fallback referrals_count ->', next);
             }
           }
-        } catch (incErr) {
-          console.warn('[telegram webhook] final error incrementing referral', incErr);
         }
+
+        return res.json({ ok: true });
       }
 
+      // -------------------------
+      //  Ignore other messages
+      // -------------------------
       return res.json({ ok: true });
+    } catch (err) {
+      console.error('[telegram webhook] error', err);
+      return res.status(500).json({ error: err.message || 'server error' });
     }
-
-    // Not a /start or not referral — ignore
-    return res.json({ ok: true });
-
-  } catch (err) {
-    console.error('[telegram webhook] handler error', err);
-    return res.status(500).json({ error: err?.message || 'server error' });
   }
-});
+);
 
 
 
