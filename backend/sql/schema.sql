@@ -1,114 +1,100 @@
---------------------------------------------------------------------------------
--- Migration: users table + referral RPC + referral trigger
--- Run in Supabase SQL Editor (runs as DB owner).
---------------------------------------------------------------------------------
-
-BEGIN;
-
--- 1) Create users table (if not exists)
-CREATE TABLE IF NOT EXISTS public.users (
-  id text PRIMARY KEY,
+-- schema.sql
+-- Run in Supabase > SQL editor
+create table if not exists public.users (
+  id text primary key,
   username text,
-  coins bigint DEFAULT 0,
-  businesses jsonb DEFAULT '{}'::jsonb,
-  level int DEFAULT 1,
-  last_mine bigint DEFAULT 0,
-  referrals_count int DEFAULT 0,
-  referred_by text DEFAULT NULL,
-  subscribed boolean DEFAULT false,
-  created_at timestamptz DEFAULT now()
+  coins bigint default 0,
+  businesses jsonb default '{}'::jsonb,
+  level int default 1,
+  last_mine bigint default 0,
+  referrals_count int default 0,
+  referred_by text default null,
+  subscribed boolean default false,
+  created_at timestamptz default now()
 );
 
--- Optional index to speed lookups by referred_by
-CREATE INDEX IF NOT EXISTS idx_users_referred_by ON public.users (referred_by);
+create table if not exists public.transactions (
+  id bigserial primary key,
+  user_id text not null,
+  amount bigint not null,
+  type text,
+  note text,
+  created_at timestamptz default now()
+);
 
---------------------------------------------------------------------------------
--- 2) Atomic RPC: increment_referral_bonus(ref_id, bonus_coins)
--- Use this from server (supabase.rpc) when you want to increment referrals_count
--- and optionally add coins to the referrer in one atomic statement.
--- SECURITY DEFINER so it runs with the function owner's privileges (create in SQL editor).
---------------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.increment_referral_bonus(
-  ref_id text,
-  bonus_coins integer DEFAULT 0
-)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-  -- defensive: avoid self-referral and null
-  IF ref_id IS NULL THEN
-    RETURN;
-  END IF;
+create or replace function public.manual_refer(
+  referrer_username text,
+  referred_id text,
+  referred_username text
+) returns jsonb
+language plpgsql
+security definer
+as $$
+declare
+  ref_row record;
+  self_row record;
+  updated boolean := false;
+begin
+  -- Find inviter by username (case-insensitive)
+  select * into ref_row 
+  from public.users 
+  where lower(username) = lower(referrer_username)
+  limit 1;
 
-  UPDATE public.users
-  SET
-    referrals_count = COALESCE(referrals_count, 0) + 1,
-    coins = COALESCE(coins, 0) + GREATEST(bonus_coins, 0)
-  WHERE id = ref_id;
-END;
+  if not found then
+    return jsonb_build_object('success', false, 'error', 'inviter_not_found');
+  end if;
+
+  -- Self referral check
+  if ref_row.id = referred_id then
+    return jsonb_build_object('success', false, 'error', 'self_referral');
+  end if;
+
+  -- Lock referred user row if exists
+  select id, referred_by into self_row
+  from public.users
+  where id = referred_id
+  for update;
+
+  -- If referred user does not exist → create & attach referral
+  if not found then
+    insert into public.users
+      (id, username, coins, businesses_json, level, experience, referred_by, referrals_count, last_mine, subscribed, created_at)
+    values
+      (referred_id, referred_username, 100, '{}'::jsonb, 1, 0, ref_row.id, 0, null, false, now());
+
+    updated := true;
+
+  else
+    -- User exists → update referral only if empty or same inviter
+    if self_row.referred_by is null or self_row.referred_by = ref_row.id then
+      update public.users 
+      set referred_by = ref_row.id 
+      where id = referred_id;
+
+      updated := true;
+    else
+      return jsonb_build_object('success', false, 'error', 'already_referred');
+    end if;
+  end if;
+
+  -- If referral registered, reward inviter
+  if updated then
+    update public.users
+    set coins = coins + 100,
+        referrals_count = coalesce(referrals_count,0) + 1
+    where id = ref_row.id;
+
+    insert into public.transactions (user_id, amount, type, note)
+    values (ref_row.id, 100, 'refer', 'Referral bonus from ' || referred_id);
+
+    return jsonb_build_object(
+      'success', true,
+      'inviter_id', ref_row.id,
+      'inviter_username', ref_row.username
+    );
+  end if;
+
+  return jsonb_build_object('success', false, 'error', 'unknown');
+end;
 $$;
-
---------------------------------------------------------------------------------
--- 3) Trigger-based automation: when a NEW user is inserted with referred_by,
--- automatically increment the referrer's referrals_count and give a coins bonus.
--- This trigger is useful so you don't need to call RPC — inserting the new user
--- (with referred_by set) is sufficient to credit the referrer.
--- NOTE: triggers run on INSERT. If you use UPSERT (INSERT ... ON CONFLICT DO UPDATE)
--- and the row already existed, the INSERT branch will not happen and trigger will not fire.
---------------------------------------------------------------------------------
-
--- Adjustable reward amount for trigger path:
--- Set the constant below to the number of coins to award on referral via trigger.
--- Edit the value and rerun the trigger creation if you want a different bonus.
-DO $$
-BEGIN
-  -- create a config variable in the current transaction only (value 100). If you prefer,
-  -- simply edit the trigger function below to change 100 to some other integer.
-  -- (This DO block is just explanatory — the trigger function has the value baked in.)
-  NULL;
-END$$;
-
--- Create the trigger function
-CREATE OR REPLACE FUNCTION public.users_after_insert_referral_trigger()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-DECLARE
-  reward_coins integer := 100; -- coins to give to the referrer for each successful referred insert
-BEGIN
-  -- Only run when referred_by is present and not equal to the new user's id (prevent self-ref)
-  IF NEW.referred_by IS NOT NULL AND NEW.referred_by <> NEW.id THEN
-    UPDATE public.users
-    SET
-      referrals_count = COALESCE(referrals_count, 0) + 1,
-      coins = COALESCE(coins, 0) + reward_coins
-    WHERE id = NEW.referred_by;
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
-
--- Drop existing trigger if any, then create it
-DROP TRIGGER IF EXISTS trg_users_after_insert_referral ON public.users;
-CREATE TRIGGER trg_users_after_insert_referral
-  AFTER INSERT ON public.users
-  FOR EACH ROW
-  WHEN (NEW.referred_by IS NOT NULL)
-  EXECUTE FUNCTION public.users_after_insert_referral_trigger();
-
---------------------------------------------------------------------------------
--- 4) Grants (optional)
--- Typically you run RPCs from your server using the SUPABASE_SERVICE_KEY so no grants
--- are needed for public/anon roles. If you plan to allow authenticated clients to call
--- the RPC, explicitly grant EXECUTE to the appropriate role(s).
--- Example (ONLY if you want authenticated users to call the RPC directly):
--- GRANT EXECUTE ON FUNCTION public.increment_referral_bonus(text, integer) TO authenticated;
---
--- Be careful: do NOT grant execute to "anon" unless you're sure it's safe.
---------------------------------------------------------------------------------
-
-COMMIT;
