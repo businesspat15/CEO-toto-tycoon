@@ -1,10 +1,4 @@
 // index.js
-// Simple Express backend for CEO TOTO Tycoon
-// - Handles user fetch/create
-// - Mining endpoint with cooldown and passive income
-// - Basic Telegram webhook for /start referrals
-// - Uses Supabase service_role key for DB writes
-
 import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
@@ -13,29 +7,23 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
+app.set('trust proxy', 1);
 
-app.set("trust proxy", 1);
-
-// Normalize FRONTEND_ORIGIN to avoid trailing slash mismatches
+// Normalize FRONTEND_ORIGIN
 const RAW_FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '';
-const FRONTEND_ORIGIN = RAW_FRONTEND_ORIGIN.replace(/\/$/, ''); // e.g. "https://...vercel.app"
+const FRONTEND_ORIGIN = RAW_FRONTEND_ORIGIN.replace(/\/$/, '');
 
-// EARLY OPTIONS / PRE-FLIGHT SHORT-CIRCUIT
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
-    // Allowed origins: frontend + localhost (dev)
     const allowed = [FRONTEND_ORIGIN, 'http://localhost:5173'].filter(Boolean);
     const origin = req.headers.origin;
     if (origin && allowed.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
     } else if (!origin) {
-      // requests without Origin (curl, server-to-server)
       res.setHeader('Access-Control-Allow-Origin', '*');
     } else {
-      // origin not allowed — still respond to preflight but without allowing CORS
       res.setHeader('Access-Control-Allow-Origin', 'null');
     }
-
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -50,29 +38,25 @@ app.use(cors({
   allowedHeaders: "Content-Type, Authorization",
   credentials: true
 }));
-
-app.options("*", cors());
-
+app.options('*', cors());
 app.use(express.json());
 
-// Environment variables (from .env)
+// env
 const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; // server-only service_role key
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const TELEGRAM_SECRET_PATH = process.env.TELEGRAM_SECRET_PATH || ''; // optional for webhook path security
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY; // must be service_role key for writes/RPC
+const TELEGRAM_SECRET_PATH = process.env.TELEGRAM_SECRET_PATH || '';
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error('Missing Supabase env vars. Fill SUPABASE_URL and SUPABASE_SERVICE_KEY.');
+  console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_KEY (service_role).');
   process.exit(1);
 }
 
-// Create Supabase server client with service role key (server-only)
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false }
 });
 
-// Game constants (match your frontend)
+// Game constants
 const BUSINESSES = [
   { id: 'DAPP', name: 'DAPP', cost: 1000, income: 1 },
   { id: 'TOTO_VAULT', name: 'TOTO VAULT', cost: 1000, income: 1 },
@@ -82,7 +66,7 @@ const BUSINESSES = [
   { id: 'BITCOIN', name: 'BITCOIN', cost: 1000, income: 1 },
 ];
 
-const MINE_COOLDOWN_MS = 60_000; // 1 minute
+const MINE_COOLDOWN_MS = 60_000;
 
 function calculatePassiveIncome(businesses = {}) {
   let total = 0;
@@ -93,7 +77,6 @@ function calculatePassiveIncome(businesses = {}) {
   return total;
 }
 
-// Helper: map DB snake_case to API shape
 function mapRowToUser(row) {
   if (!row) return null;
   return {
@@ -110,72 +93,67 @@ function mapRowToUser(row) {
   };
 }
 
-app.post('/api/user-debug', (req, res) => {
-  console.log('DEBUG /api/user-debug body:', req.body);
-  res.json({ body: req.body });
-});
-
 /**
- * applyReferralBonus (idempotent, uses referrals table)
- * - expects both referrerId and referredId
- * - inserts into referrals table to prevent double-credit
- * - tries RPC increment_referral_bonus first, then fallback update
+ * applyReferralBonus(referrerId, referredId)
+ * - idempotent via public.referrals
+ * - prefer RPC increment_referral_bonus, fallback to JS update
+ * - returns { ok: boolean, method?: 'rpc'|'fallback-update', debug: {...} }
  */
-async function applyReferralBonus(referrerId, referredId = null) {
+async function applyReferralBonus(referrerId, referredId) {
   const debug = { startedAt: new Date().toISOString(), referrerId, referredId };
 
   if (!referrerId) {
     debug.reason = 'no-referrer-provided';
-    console.warn('applyReferralBonus debug:', debug);
+    console.warn('applyReferralBonus:', debug);
     return { ok: false, debug };
   }
-
   if (!referredId) {
     debug.reason = 'no-referred-id';
-    console.warn('applyReferralBonus debug:', debug);
+    console.warn('applyReferralBonus:', debug);
     return { ok: false, debug };
   }
 
   try {
-    // Insert into referrals table (idempotent). If duplicate, do not credit again.
-    const { error: refErr } = await supabase
+    // 1) Insert into referrals table to ensure idempotency (duplicate -> do nothing)
+    const { error: insertErr } = await supabase
       .from('referrals')
       .insert([{ referrer_id: referrerId, referred_id: referredId }]);
 
-    if (refErr) {
-      // Unique violation = already applied
-      const isDuplicate = refErr.code === '23505' || (refErr.message && refErr.message.toLowerCase().includes('duplicate'));
+    if (insertErr) {
+      // detect duplicate (code may vary); treat as already-applied
+      const isDuplicate = insertErr.code === '23505' ||
+                          (insertErr?.message && insertErr.message.toLowerCase().includes('duplicate')) ||
+                          (insertErr?.details && insertErr.details.toLowerCase().includes('duplicate'));
       if (isDuplicate) {
         debug.reason = 'already-applied';
         console.log('applyReferralBonus: already applied', debug);
         return { ok: false, debug };
       }
-      debug.insertError = refErr;
-      console.error('applyReferralBonus: insert failed', debug);
+      debug.insertError = insertErr;
+      console.error('applyReferralBonus: referrals insert failed', debug);
       return { ok: false, debug };
     }
 
-    // Fetch current referrer row
+    // 2) Fetch referrer row
     const { data: refRow, error: selErr } = await supabase
       .from('users')
-      .select('id, referrals_count, coins')
+      .select('id, coins, referrals_count')
       .eq('id', referrerId)
       .maybeSingle();
 
     debug.fetchedRefRow = refRow ?? null;
     if (selErr || !refRow) {
-      debug.reason = selErr ? selErr.message : 'referrer-not-found';
+      debug.reason = selErr ? (selErr.message || selErr) : 'referrer-not-found';
       console.warn('applyReferralBonus: referrer fetch failed', debug);
       return { ok: false, debug };
     }
 
-    // Try RPC first (preferred)
+    // 3) Try RPC first
     try {
       const rpcStart = Date.now();
       const rpcRes = await supabase.rpc('increment_referral_bonus', { ref_id: referrerId });
       debug.rpc = { elapsedMs: Date.now() - rpcStart, result: rpcRes ?? null };
-
-      // If RPC returned an error object, treat as failure
+      // supabase RPC may return an object with an `error` property (PostgREST style)
       if (rpcRes && rpcRes.error) {
         debug.rpcError = rpcRes.error;
         console.warn('applyReferralBonus: rpc returned error object, falling back', debug);
@@ -185,10 +163,10 @@ async function applyReferralBonus(referrerId, referredId = null) {
       }
     } catch (rpcErr) {
       debug.rpcError = rpcErr?.message || rpcErr;
-      console.warn('applyReferralBonus: RPC failed, falling back', debug);
+      console.warn('applyReferralBonus: rpc threw, falling back', debug);
     }
 
-    // Fallback JS update
+    // 4) Fallback JS update
     const currentCoins = Number(refRow.coins || 0);
     const currentCount = Number(refRow.referrals_count || 0);
     const newCoins = currentCoins + 100;
@@ -211,22 +189,23 @@ async function applyReferralBonus(referrerId, referredId = null) {
 
   } catch (err) {
     debug.unexpectedError = err?.message || err;
-    console.error('applyReferralBonus: unexpected error', debug);
+    console.error('applyReferralBonus: unexpected', debug);
     return { ok: false, debug };
   }
 }
 
 /**
  * POST /api/user
- * Body: { id, username, referredBy? }
- * Fetch existing user or create a new one. If referredBy provided, credit referrer.
+ * - body: { id, username, referredBy? }
+ * - creates user if missing
+ * - if referredBy provided, credits the referrer (idempotent)
  */
 app.post('/api/user', async (req, res) => {
   try {
     const { id, username, referredBy } = req.body;
     if (!id) return res.status(400).json({ error: 'id required' });
 
-    // 1) See if user already exists (do NOT overwrite referred_by on existing users)
+    // 1) Check existing user
     const { data: existing, error: selectErr } = await supabase
       .from('users')
       .select('*')
@@ -239,17 +218,17 @@ app.post('/api/user', async (req, res) => {
     }
 
     if (existing) {
-      // user exists — return mapped user (no changes)
+      // Return user; do NOT change referred_by or credit again for existing users
       return res.json({ user: mapRowToUser(existing) });
     }
 
-    // Prevent self-referral
-    let safeReferredBy = referredBy && referredBy.toString() !== id.toString() ? referredBy.toString() : null;
+    // 2) Prevent self-referral
+    const safeReferredBy = referredBy && referredBy.toString() !== id.toString() ? referredBy.toString() : null;
     if (referredBy && !safeReferredBy) {
-      console.warn('/api/user: attempted self-referral or invalid referredBy; ignoring referredBy');
+      console.warn('/api/user: attempted self-referral; ignoring referredBy');
     }
 
-    // Insert new user (do not use upsert to avoid accidentally overwriting older fields)
+    // 3) Create new user (referred_by stored)
     const insertPayload = {
       id,
       username: username || `user_${id}`,
@@ -259,7 +238,7 @@ app.post('/api/user', async (req, res) => {
       last_mine: 0,
       referrals_count: 0,
       referred_by: safeReferredBy,
-      subscribed: false,
+      subscribed: false
     };
 
     const { data: created, error: insertErr } = await supabase
@@ -273,25 +252,20 @@ app.post('/api/user', async (req, res) => {
       return res.status(500).json({ error: insertErr.message || 'insert error' });
     }
 
-    // If referredBy was provided (and wasn't self-referral), try to credit the referrer (single call, pass referred id)
-    let appliedResult = null;
+    // 4) If referred, apply referral bonus (pass both ids)
+    let applyResult = null;
     if (safeReferredBy) {
-      appliedResult = await applyReferralBonus(safeReferredBy, id);
-      if (!appliedResult.ok) {
-        // log but don't fail creation
-        console.warn('/api/user: failed to apply referral bonus', appliedResult);
+      applyResult = await applyReferralBonus(safeReferredBy, id);
+      if (!applyResult.ok) {
+        console.warn('/api/user: applyReferralBonus result', applyResult.debug);
       } else {
-        console.log('/api/user: referral bonus applied', appliedResult);
+        console.log('/api/user: applyReferralBonus success', applyResult.debug);
       }
     }
 
-    // return user + debug info (useful while troubleshooting)
     return res.json({
       user: mapRowToUser(created),
-      debug: {
-        referredBy: safeReferredBy,
-        applyReferralResult: appliedResult
-      }
+      debug: { referredBy: safeReferredBy, applyResult }
     });
 
   } catch (err) {
@@ -302,7 +276,6 @@ app.post('/api/user', async (req, res) => {
 
 /**
  * GET /api/user/:id
- * Fetch a user by id
  */
 app.get('/api/user/:id', async (req, res) => {
   try {
@@ -323,8 +296,6 @@ app.get('/api/user/:id', async (req, res) => {
 
 /**
  * POST /api/user/update
- * Body: { id, coins?, businesses?, lastMine?, level?, subscribed? }
- * Server-side update — uses Supabase service key
  */
 app.post('/api/user/update', async (req, res) => {
   try {
@@ -357,15 +328,12 @@ app.post('/api/user/update', async (req, res) => {
 
 /**
  * POST /api/mine
- * Body: { id }
- * Enforce cooldown, calculate earned + passive, update DB
  */
 app.post('/api/mine', async (req, res) => {
   try {
     const { id } = req.body;
     if (!id) return res.status(400).json({ error: 'id required' });
 
-    // fetch user
     const { data, error: selErr } = await supabase
       .from('users')
       .select('*')
@@ -379,34 +347,22 @@ app.post('/api/mine', async (req, res) => {
     const diff = now - lastMine;
     if (diff < MINE_COOLDOWN_MS) {
       const retryAfterMs = MINE_COOLDOWN_MS - diff;
-      // set Retry-After in seconds for clients
       res.setHeader('Retry-After', Math.ceil(retryAfterMs / 1000));
       return res.status(429).json({ error: 'cooldown', retryAfterMs });
     }
 
-    // Earn 2 or 3 coins + passive income
     const earned = Math.floor(Math.random() * 2) + 2;
     const passive = calculatePassiveIncome(data.businesses || {});
     const newCoins = (data.coins || 0) + earned + passive;
 
-    // Update DB
     const { error: updErr } = await supabase
       .from('users')
-      .update({
-        coins: newCoins,
-        last_mine: now
-      })
+      .update({ coins: newCoins, last_mine: now })
       .eq('id', id);
 
     if (updErr) throw updErr;
 
-    return res.json({
-      earned,
-      passive,
-      coins: newCoins,
-      lastMine: now
-    });
-
+    return res.json({ earned, passive, coins: newCoins, lastMine: now });
   } catch (err) {
     console.error('/api/mine', err);
     return res.status(500).json({ error: err?.message || 'server error' });
@@ -414,15 +370,14 @@ app.post('/api/mine', async (req, res) => {
 });
 
 /**
- * Telegram webhook (optional) - handle /start referrals
- * Set webhook to: https://<your-backend>/telegram/webhook or with TELEGRAM_SECRET_PATH
+ * Telegram webhook: create TG user and apply referral if present
+ * Set webhook to https://<your-backend>/telegram/webhook or include secret path via TELEGRAM_SECRET_PATH
  */
 app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` : ''}`, async (req, res) => {
   try {
     const body = req.body;
     if (!body) return res.sendStatus(204);
 
-    // Basic update handling
     const msg = body.message || body.edited_message;
     if (!msg) return res.sendStatus(204);
 
@@ -431,62 +386,66 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
     const tgId = from.id ? from.id.toString() : null;
     if (!tgId) return res.sendStatus(204);
 
-    // If user started with referral
+    // If user started with referral (e.g., "/start ref_<referrerId>")
+    let referrerId = null;
     if (text && text.startsWith('/start')) {
       const parts = text.split(' ').filter(Boolean);
-      let referrerId = null;
       if (parts[1] && parts[1].startsWith('ref_')) {
         referrerId = parts[1].replace('ref_', '').trim();
       }
+    }
 
-      // create the new user if not exists and increment referrer count
-      const { data: existing, error: selErr } = await supabase
-        .from('users')
-        .select('id')
-        .eq('id', tgId)
-        .maybeSingle();
+    // Check if user exists
+    const { data: existing, error: selErr } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', tgId)
+      .maybeSingle();
 
-      if (selErr) {
-        console.error('telegram webhook: select error', selErr);
-        // return 200 so Telegram doesn't keep retrying too aggressively
-        return res.status(200).json({ ok: false, error: selErr.message || 'db error' });
+    if (selErr) {
+      console.error('telegram webhook: select error', selErr);
+      return res.status(200).json({ ok: false, error: selErr.message || 'db error' });
+    }
+
+    if (!existing) {
+      // Prevent self-referral
+      if (referrerId && referrerId === tgId) {
+        console.warn('telegram webhook: self-referral attempt; ignoring referred id');
+        referrerId = null;
       }
 
-      if (!existing) {
-        // Prevent self-referral
-        if (referrerId && referrerId === tgId) {
-          console.warn('telegram webhook: self-referral attempt; ignoring referred id');
-          referrerId = null;
-        }
+      const username = from.username || `${from.first_name || 'tg'}_${tgId}`;
 
-        const username = from.username || `${from.first_name || 'tg'}_${tgId}`;
-        const insertPayload = {
-          id: tgId,
-          username,
-          coins: 100,
-          businesses: {},
-          level: 1,
-          last_mine: 0,
-          referrals_count: 0,
-          referred_by: referrerId || null,
-          subscribed: false
-        };
+      // If referred, you may want to give a small bonus to the new user; adjust as desired.
+      const startingCoins = referrerId ? 150 : 100;
 
-        try {
-          await supabase.from('users').insert([insertPayload]);
-        } catch (insertErr) {
-          console.error('telegram webhook: insert failed', insertErr);
-          return res.status(200).json({ ok: false, error: insertErr.message || 'insert error' });
-        }
+      const insertPayload = {
+        id: tgId,
+        username,
+        coins: startingCoins,
+        businesses: {},
+        level: 1,
+        last_mine: 0,
+        referrals_count: 0,
+        referred_by: referrerId || null,
+        subscribed: false
+      };
 
-        // Try to credit the referrer (best-effort) - pass both ids
-        if (referrerId) {
-          const applied = await applyReferralBonus(referrerId, tgId);
-          if (!applied.ok) {
-            console.warn('telegram webhook: failed to apply referral bonus', applied);
-          } else {
-            console.log('telegram webhook: referral bonus applied', applied);
-          }
+      // Insert new TG user
+      try {
+        await supabase.from('users').insert([insertPayload]);
+      } catch (insertErr) {
+        console.error('telegram webhook: insert failed', insertErr);
+        return res.status(200).json({ ok: false, error: insertErr.message || 'insert error' });
+      }
+
+      // If there is a referrer, call applyReferralBonus(referrerId, tgId)
+      if (referrerId) {
+        const applied = await applyReferralBonus(referrerId, tgId);
+        if (!applied.ok) {
+          console.warn('telegram webhook: failed to apply referral bonus', applied.debug || applied);
+        } else {
+          console.log('telegram webhook: referral bonus applied', applied.debug || applied);
         }
       }
     }
@@ -498,27 +457,26 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
   }
 });
 
+/**
+ * Leaderboard
+ */
 app.get('/api/leaderboard', async (req, res) => {
   try {
     const limit = Math.min(100, parseInt(req.query.limit || '20', 10) || 20);
-
     const { data, error } = await supabase
       .from('users')
       .select('id, username, coins, businesses, level')
       .order('coins', { ascending: false })
       .limit(limit);
-
     if (error) throw error;
-
     return res.json({ users: data || [] });
-
   } catch (err) {
     console.error('/api/leaderboard', err);
     return res.status(500).json({ error: err?.message || 'server error' });
   }
 });
 
-// Debug endpoint: force applyReferralBonus for testing (now accepts referredId)
+// Debug referral endpoint (accepts both query params)
 app.get('/debug/referral', async (req, res) => {
   try {
     const referrerId = req.query.referrerId ? String(req.query.referrerId) : null;
