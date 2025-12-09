@@ -318,7 +318,8 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           const errCode = rpcResult.error || 'unknown';
           if (errCode === 'inviter_not_found') await sendTelegram(chatId, '❌ Inviter not found in database.');
           else if (errCode === 'self_referral') await sendTelegram(chatId, '😅 You can’t refer yourself!');
-          else if (errCode === 'already_referred') await sendTelegram(chatId, '⚠️ You have already been referred or referral couldn't be recorded.');
+          else if (errCode === 'already_referred') await sendTelegram(chatId, "⚠️ You have already been referred or referral couldn't be recorded.");
+
           else await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
           return res.json({ ok: false, error: errCode });
         }
@@ -403,7 +404,8 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
             } else if (errCode === 'self_referral') {
               await sendTelegram(chatId, '😅 You can’t refer yourself!');
             } else if (errCode === 'already_referred') {
-              await sendTelegram(chatId, '⚠️ You have already been referred or referral couldn\'t be recorded.');
+              await sendTelegram(chatId, "⚠️ You have already been referred or referral couldn't be recorded.");
+
             } else {
               await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
             }
