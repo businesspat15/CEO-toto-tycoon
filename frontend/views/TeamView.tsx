@@ -29,7 +29,7 @@ const TeamView: React.FC<TeamViewProps> = ({ user }) => {
             <div className="w-12 h-12 rounded-full bg-indigo-500/20 flex items-center justify-center text-2xl">🎁</div>
             <div>
                 <p className="text-white font-medium">Earn 100 coins</p>
-                <p className="text-indigo-200 text-sm">for every friend you invite</p>
+                <p className="text-indigo-200 text-sm">for every friend you invite and Follow X.</p>
             </div>
         </div>
       </div>

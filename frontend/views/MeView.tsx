@@ -26,8 +26,12 @@ const MeView: React.FC<MeViewProps> = ({ user, onSubscribeToggle }) => {
   return (
     <div className="h-full px-4 pt-8 pb-24 overflow-y-auto bg-slate-900 relative">
       <div className="flex flex-col items-center mb-8">
-        <div className="w-24 h-24 bg-gradient-to-tr from-slate-700 to-slate-600 rounded-full flex items-center justify-center text-4xl shadow-xl mb-4 border-4 border-slate-800">
-          😎
+        <div className="w-24 h-24 bg-gradient-to-tr from-slate-700 to-slate-600 rounded-full flex items-center justify-center shadow-xl mb-4 border-4 border-slate-800 overflow-hidden">
+          <img
+            src="https://assets.zyrosite.com/mk3vgMQRxEcer7k1/toto_the-_ceo-Yle45r8kvWIVzwka.png"
+            alt="Profile"
+            className="w-full h-full object-cover"
+          />
         </div>
         <h2 className="text-2xl font-bold text-white">{user.username}</h2>
         <div className="flex flex-col items-center mt-1">

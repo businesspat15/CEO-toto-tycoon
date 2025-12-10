@@ -90,22 +90,7 @@ const MineView: React.FC<MineViewProps> = ({ user, onMine }) => {
         <span className="text-slate-400 uppercase tracking-widest text-xs mt-1">Total Balance</span>
       </div>
 
-      {/* Result Notification Area */}
-      <div className="h-16 flex items-center justify-center mb-2 w-full">
-        {lastResult && !isMining && (
-          <div className="bg-lime-900/40 border border-lime-500/30 px-4 py-2 rounded-lg animate-fade-in text-center">
-             <div className="text-lime-400 font-bold">
-               🎉 +{lastResult.earned} Coins Mined!
-             </div>
-             {lastResult.passive > 0 && (
-               <div className="text-xs text-lime-200/70">
-                 +{lastResult.passive} Passive Income
-               </div>
-             )}
-          </div>
-        )}
-      </div>
-
+     
       {/* Mining Interaction */}
       <div className="flex-1 flex flex-col justify-center items-center w-full max-w-sm">
         <div className="relative w-64 h-64">

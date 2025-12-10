@@ -113,7 +113,7 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
           {error && <div className="p-4 text-red-400">Error: {error}</div>}
           {!loading && users.length === 0 && !error && <div className="p-4 text-slate-400">No players yet.</div>}
 
-          {users.map((u, idx) => {
+          {users.slice(0, 10).map((u, idx) => {
             const rank = idx + 1;
             const isMe = u.id === user.id || u.username === user.username;
 
@@ -127,7 +127,8 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
                 <div className="flex items-center gap-4">
                   <div className="w-6 text-center font-mono text-slate-500 font-bold">{medal || rank}</div>
                   <div className="flex flex-col">
-                    <span className={`font-medium ${isMe ? 'text-lime-400' : 'text-slate-200'}`}>{u.username}</span>
+                    <span className={`font-medium ${isMe ? 'text-lime-400' : 'text-slate-200'}`}>{u.username.slice(0, 4) +"****"}
+</span>
                    
                   </div>
                 </div>

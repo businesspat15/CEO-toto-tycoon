@@ -1,7 +1,7 @@
 export enum Tab {
   MINE = 'Mine',
   LEADERBOARD = 'Leaderboard',
-  UPGRADE = 'Upgrade',
+  UPGRADE = 'Asset',
   TEAM = 'Team',
   ME = 'Me'
 }
