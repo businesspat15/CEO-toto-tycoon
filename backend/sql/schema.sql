@@ -1,12 +1,13 @@
--- ====================================================================
--- FULL SCHEMA & RPCs for CEO TOTO Tycoon (corrected)
--- - Ensures businesses.total_coins_invested increments atomically
--- - Race-safe manual_refer_by_id
--- - purchase_business uses INSERT ... ON CONFLICT DO UPDATE
--- - Helpful FK and indexes (FK creation done conditionally)
--- ====================================================================
+-- ============================================================================
+-- FULL SQL: derive businesses.total_coins_invested from users.businesses JSON
+-- - Adds businesses.unit_price (if missing)
+-- - Adds refresh_business_totals_from_users() which recomputes totals
+-- - Adds optional refresh_business_totals_from_transactions()
+-- - Idempotent / safe to run multiple times
+-- ============================================================================
+BEGIN;
 
--- 1) users table
+-- Ensure base tables exist (keeps existing definitions if already present)
 create table if not exists public.users (
   id text primary key,
   username text,
@@ -16,11 +17,10 @@ create table if not exists public.users (
   last_mine bigint default 0,
   referrals_count int default 0,
   referred_by text default null,
-  subscribed boolean default false,
+  subscribed boolean default true,
   created_at timestamptz default now()
 );
 
--- 2) transactions table (audit)
 create table if not exists public.transactions (
   id bigserial primary key,
   user_id text not null,
@@ -30,27 +30,27 @@ create table if not exists public.transactions (
   created_at timestamptz default now()
 );
 
--- 3) businesses table (simple global totals per business)
 create table if not exists public.businesses (
   business text primary key,
-  total_coins_invested bigint default 0
+  total_coins_invested bigint default 0,
+  unit_price bigint default 1000
 );
 
--- 4) Seed common business rows (won't overwrite existing)
-insert into public.businesses (business, total_coins_invested) values
-('DAPP', 0),
-('TOTO_VAULT', 0),
-('CIFCI_STABLE', 0),
-('TYPOGRAM', 0),
-('APPLE', 0),
-('BITCOIN', 0)
+-- Seed common businesses (won't overwrite existing unit_price or totals)
+insert into public.businesses (business, total_coins_invested, unit_price) values
+('DAPP', 0, 1000),
+('TOTO_VAULT', 0, 1000),
+('CIFCI_STABLE', 0, 1000),
+('TYPOGRAM', 0, 1000),
+('APPLE', 0, 1000),
+('BITCOIN', 0, 1000)
 on conflict (business) do nothing;
 
--- 5) Indexes (idempotent)
+-- Ensure indexes exist
 create index if not exists idx_transactions_user_id on public.transactions(user_id);
 create index if not exists idx_users_coins_desc on public.users(coins desc);
 
--- 6) Create foreign key constraint only if it doesn't exist
+-- Conditionally add foreign key constraint for transactions.user_id -> users.id
 do $$
 begin
   if not exists (
@@ -69,191 +69,146 @@ begin
 end
 $$;
 
--- ====================================================================
--- 7) manual_refer_by_id: race-safe, idempotent referral function
--- returns jsonb: { success: bool, error: text?, inviter_id?, inviter_username? }
--- ====================================================================
-create or replace function public.manual_refer_by_id(
-  referrer_id text,
-  referred_id text,
-  referred_username text
-) returns jsonb
+-- ---------------------------------------------------------------------------
+-- Add unit_price column if missing (idempotent)
+-- Note: PostgreSQL supports ADD COLUMN IF NOT EXISTS
+-- ---------------------------------------------------------------------------
+alter table public.businesses add column if not exists unit_price bigint default 1000;
+
+-- ---------------------------------------------------------------------------
+-- Helper: set default unit prices for known businesses (call manually if needed)
+-- ---------------------------------------------------------------------------
+create or replace function public.set_default_unit_prices() returns void language sql as $$
+  update public.businesses set unit_price = 1000 where business in ('DAPP','TOTO_VAULT','CIFCI_STABLE','TYPOGRAM','APPLE','BITCOIN') and (unit_price is null or unit_price = 0);
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Function: refresh_business_totals_from_users()
+-- Recomputes total_coins_invested for each business by summing across all users:
+-- SUM( (users.businesses ->> business)::bigint * businesses.unit_price )
+-- If businesses.unit_price is missing, defaults to 1000.
+-- Returns jsonb: { success: true, updated_count: n }.
+-- ---------------------------------------------------------------------------
+create or replace function public.refresh_business_totals_from_users()
+returns jsonb
 language plpgsql
 security definer
 as $$
 declare
-  ref_row record;
-  self_row record;
+  rec record;
+  updated int := 0;
 begin
-  -- find inviter by id
-  select id, username into ref_row from public.users where id = referrer_id limit 1;
-  if not found then
-    return jsonb_build_object('success', false, 'error', 'inviter_not_found');
-  end if;
+  /*
+    Strategy:
+    - Extract distinct business keys used in users.businesses
+    - For each key, aggregate the quantity across users (cast safely)
+    - Multiply by unit_price from public.businesses (or 1000 default)
+    - Upsert into public.businesses (set total_coins_invested = computed sum)
+  */
 
-  -- prevent self-referral
-  if ref_row.id = referred_id then
-    return jsonb_build_object('success', false, 'error', 'self_referral');
-  end if;
+  with keys as (
+    select distinct jsonb_object_keys(u.businesses) as business
+    from public.users u
+    where u.businesses is not null and u.businesses <> '{}'::jsonb
+  ),
+  agg as (
+    select
+      k.business,
+      sum( (coalesce(nullif(u.businesses ->> k.business, ''), '0'))::bigint * coalesce(b.unit_price, 1000) ) as total
+    from keys k
+    join public.users u on (u.businesses ->> k.business) is not null
+    left join public.businesses b on b.business = k.business
+    group by k.business
+  )
+  -- upsert aggregated totals into businesses table
+  insert into public.businesses (business, total_coins_invested, unit_price)
+  select a.business, coalesce(a.total,0)::bigint, coalesce(b.unit_price, 1000)
+  from agg a
+  left join public.businesses b on b.business = a.business
+  on conflict (business) do update
+    set total_coins_invested = excluded.total_coins_invested,
+        unit_price = coalesce(public.businesses.unit_price, excluded.unit_price);
 
-  -- Try to create the referred user if missing, but avoid raising on concurrent inserts
-  begin
-    insert into public.users (
-      id, username, coins, businesses, level, last_mine, referrals_count, referred_by, subscribed, created_at
-    ) values (
-      referred_id, referred_username, 100, '{}'::jsonb, 1, 0, 0, null, false, now()
-    )
-    on conflict (id) do nothing;
-  exception when others then
-    -- continue: we'll re-select the row below
-    raise notice 'manual_refer_by_id: insert attempt failed: %', sqlerrm;
-  end;
+  GET DIAGNOSTICS updated = ROW_COUNT;
 
-  -- Select the referred user's row FOR UPDATE to serialize checks/updates
-  select id, referred_by into self_row from public.users where id = referred_id for update;
-  if not found then
-    return jsonb_build_object('success', false, 'error', 'user_create_failed');
-  end if;
+  -- Optionally set total_coins_invested = 0 for businesses that no longer exist in users list:
+  -- (if desired) -- uncomment to zero out business rows not present in any user
+  -- update public.businesses set total_coins_invested = 0
+  -- where business not in (select business from agg);
 
-  -- If referred_by already set, do not reward again
-  if self_row.referred_by is not null then
-    return jsonb_build_object('success', false, 'error', 'already_referred');
-  end if;
-
-  -- Set referred_by
-  update public.users set referred_by = ref_row.id where id = referred_id;
-
-  -- Reward inviter
-  update public.users
-    set coins = coalesce(coins,0) + 100,
-        referrals_count = coalesce(referrals_count,0) + 1
-    where id = ref_row.id;
-
-  insert into public.transactions (user_id, amount, type, note)
-    values (ref_row.id, 100, 'refer', 'Referral bonus from ' || referred_id);
-
-  return jsonb_build_object('success', true, 'inviter_id', ref_row.id, 'inviter_username', ref_row.username);
+  return jsonb_build_object('success', true, 'updated_count', updated);
 end;
 $$;
 
--- ====================================================================
--- 8) purchase_business: atomic, race-safe increment of business totals
--- CALL example:
--- select public.purchase_business('DAPP', '12345', 2, 1000);
--- Returns jsonb: { success: true/false, coins: <new>, user_businesses: <json>, total_invested: <bigint> }
--- ====================================================================
-create or replace function public.purchase_business(
-  p_business text,
-  p_user_id text,
-  p_qty int,
-  p_unit_cost bigint
-) returns jsonb
+-- ---------------------------------------------------------------------------
+-- Optional: refresh from transactions (historical audit)
+-- If you prefer computing totals from transactions.amount (purchase records),
+-- use this function. It aggregates purchase transactions and writes totals.
+-- ---------------------------------------------------------------------------
+create or replace function public.refresh_business_totals_from_transactions()
+returns jsonb
 language plpgsql
 security definer
 as $$
 declare
-  usr record;
-  cur_qty int := 0;
-  total_cost bigint;
-  new_coins bigint;
-  new_businesses jsonb;
-  biz record;
-  p_business_norm text;
+  updated int := 0;
 begin
-  if p_qty is null or p_qty <= 0 then
-    return jsonb_build_object('success', false, 'error', 'invalid_qty');
-  end if;
+  with purchases as (
+    select
+      (regexp_matches(note, 'Bought\\s+\\d+\\s+x\\s+([A-Z0-9_]+)\\s+@'))[1] as business,
+      sum(amount)::bigint as total_amount
+    from public.transactions
+    where type = 'purchase' and note ~ 'Bought\\s+\\d+\\s+x\\s+[A-Z0-9_]+\\s+@'
+    group by 1
+  )
+  insert into public.businesses (business, total_coins_invested, unit_price)
+  select p.business, p.total_amount, coalesce(b.unit_price, 1000)
+  from purchases p
+  left join public.businesses b on b.business = p.business
+  on conflict (business) do update
+    set total_coins_invested = excluded.total_coins_invested,
+        unit_price = coalesce(public.businesses.unit_price, excluded.unit_price);
 
-  if p_unit_cost is null or p_unit_cost < 0 then
-    return jsonb_build_object('success', false, 'error', 'invalid_price');
-  end if;
-
-  -- normalize business name (trim + upper) so the businesses table keys are consistent
-  p_business_norm := upper(trim(coalesce(p_business, '')));
-
-  total_cost := p_unit_cost * p_qty;
-
-  -- lock user's row
-  select * into usr from public.users where id = p_user_id for update;
-  if not found then
-    return jsonb_build_object('success', false, 'error', 'user_not_found');
-  end if;
-
-  if coalesce(usr.coins,0) < total_cost then
-    return jsonb_build_object('success', false, 'error', 'insufficient_funds', 'needed', total_cost, 'have', coalesce(usr.coins,0));
-  end if;
-
-  -- compute current qty from JSON (safe)
-  if usr.businesses is not null then
-    begin
-      cur_qty := (usr.businesses ->> p_business_norm)::int;
-    exception when others then
-      cur_qty := 0;
-    end;
-    if cur_qty is null then cur_qty := 0; end if;
-  else
-    cur_qty := 0;
-  end if;
-
-  -- update user's businesses JSON: set new qty = cur_qty + p_qty
-  new_businesses := jsonb_set(coalesce(usr.businesses, '{}'::jsonb), array[p_business_norm], to_jsonb(cur_qty + p_qty), true);
-
-  new_coins := coalesce(usr.coins,0) - total_cost;
-
-  -- update users row with new coins and businesses
-  update public.users
-    set coins = new_coins,
-        businesses = new_businesses
-  where id = p_user_id;
-
-  -- atomically increment/insert total_coins_invested for the normalized business
-  insert into public.businesses (business, total_coins_invested)
-    values (p_business_norm, total_cost)
-    on conflict (business) do update
-      set total_coins_invested = public.businesses.total_coins_invested + EXCLUDED.total_coins_invested;
-
-  -- insert transaction record
-  insert into public.transactions (user_id, amount, type, note)
-    values (p_user_id, total_cost, 'purchase', 'Bought ' || p_qty || ' x ' || p_business_norm || ' @' || p_unit_cost);
-
-  -- return useful info (fresh values)
-  select total_coins_invested into biz from public.businesses where business = p_business_norm;
-
-  return jsonb_build_object(
-    'success', true,
-    'coins', new_coins,
-    'user_businesses', (select businesses from public.users where id = p_user_id),
-    'total_invested', coalesce(biz.total_coins_invested,0)
-  );
-exception
-  when others then
-    -- bubble up error message for debugging (can be restricted in production)
-    return jsonb_build_object('success', false, 'error', 'internal_error', 'message', sqlerrm);
+  GET DIAGNOSTICS updated = ROW_COUNT;
+  return jsonb_build_object('success', true, 'updated_count', updated);
 end;
 $$;
 
--- ====================================================================
--- 9) Optional repair: Recompute businesses.total_coins_invested from transactions
--- This will replace totals with sums computed from transaction.amount for purchase rows.
--- NOTE: This depends on the 'note' format used in the purchase function:
--- note = 'Bought <qty> x <BUSINESS> @<unit_cost>'
--- If your historical transactions follow that format, this will work.
--- Run only if you want to repair existing totals.
--- ====================================================================
-with purchases as (
-  select
-    (regexp_matches(note, 'Bought\\s+\\d+\\s+x\\s+([A-Z0-9_]+)\\s+@'))[1] as business,
-    amount
-  from public.transactions
-  where type = 'purchase' and note ~ 'Bought\\s+\\d+\\s+x\\s+[A-Z0-9_]+\\s+@'
+-- ---------------------------------------------------------------------------
+-- Optional: convenience view to see computed totals from users (no writes)
+-- ---------------------------------------------------------------------------
+create or replace view public.business_totals_from_users as
+with keys as (
+  select distinct jsonb_object_keys(u.businesses) as business
+  from public.users u
+  where u.businesses is not null and u.businesses <> '{}'::jsonb
 )
-insert into public.businesses (business, total_coins_invested)
-select business, sum(amount)::bigint
-from purchases
-group by business
-on conflict (business) do update
-  set total_coins_invested = excluded.total_coins_invested;
+select
+  k.business,
+  sum( (coalesce(nullif(u.businesses ->> k.business, ''), '0'))::bigint ) as total_qty,
+  coalesce(b.unit_price,1000) as unit_price,
+  sum( (coalesce(nullif(u.businesses ->> k.business, ''), '0'))::bigint ) * coalesce(b.unit_price,1000) as computed_total_invested
+from keys k
+join public.users u on (u.businesses ->> k.business) is not null
+left join public.businesses b on b.business = k.business
+group by k.business, b.unit_price
+order by computed_total_invested desc;
 
--- ====================================================================
--- Done
--- ====================================================================
+COMMIT;
+
+-- ============================================================================
+-- Quick usage:
+-- 1) Ensure unit prices are set as desired:
+--    select public.set_default_unit_prices();
+--    -- or update unit_price manually:
+--    update public.businesses set unit_price = 1200 where business = 'APPLE';
+--
+-- 2) Recompute totals from users' JSON:
+--    select public.refresh_business_totals_from_users();
+--
+-- 3) (Optional) Recompute totals from transactions:
+--    select public.refresh_business_totals_from_transactions();
+--
+-- 4) Inspect computed view (no writes):
+--    select * from public.business_totals_from_users;
+-- ============================================================================
