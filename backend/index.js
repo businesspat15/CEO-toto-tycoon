@@ -72,7 +72,7 @@ function mapRowToUser(row) {
     lastMine: row.last_mine ?? 0,
     referralsCount: row.referrals_count ?? 0,
     referredBy: row.referred_by ?? null,
-    subscribed: row.subscribed ?? false,
+    subscribed: row.subscribed ?? true,
     createdAt: row.created_at ?? null
   };
 }
@@ -144,7 +144,8 @@ app.post('/api/user', async (req, res) => {
       last_mine: 0,
       referrals_count: 0,
       referred_by: null,
-      subscribed: false,
+      // NEW: subscribe by default so broadcasts reach new users; users may opt-out later.
+      subscribed: true,
     };
 
     const { data: created, error: upsertErr } = await supabase
@@ -418,10 +419,11 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ callback_query_id: callbackQuery.id, text: 'Broadcasting to subscribers...' })
           });
-        } catch(e){}
+        } catch (e){}
 
         // Fetch subscribers and broadcast
         try {
+          // Users with subscribed = true will receive broadcasts. New users default to subscribed=true.
           const { data: users, error: usersErr } = await supabase
             .from('users')
             .select('id')
@@ -536,6 +538,40 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
         }
         const inviter = rows[0];
 
+        // ensure the referred user exists (upsert) to avoid duplicate insert race
+        try {
+          await supabase.from('users').upsert([{
+            id: tgId,
+            username,
+            coins: 100,
+            businesses: {},
+            level: 1,
+            last_mine: 0,
+            referrals_count: 0,
+            referred_by: null,
+            subscribed: true
+          }], { onConflict: 'id' });
+        } catch (e) {
+          console.warn('upsert referred user failed (refer by username)', e?.message || e);
+        }
+
+        // quick guard: if this user is already referred, short-circuit
+        try {
+          const { data: existingRef, error: refErr } = await supabase
+            .from('users')
+            .select('referred_by')
+            .eq('id', tgId)
+            .maybeSingle();
+          if (refErr) throw refErr;
+          if (existingRef && existingRef.referred_by) {
+            await sendTelegram(chatId, "⚠️ You have already been referred and can't be referred again.");
+            return res.json({ ok: false, error: 'already_referred' });
+          }
+        } catch (e) {
+          // continue to RPC if check fails — RPC also handles duplicates
+          console.warn('referrer check failed', e?.message || e);
+        }
+
         // call RPC by id
         const { data: rpcData, error: rpcErr } = await supabase.rpc('manual_refer_by_id', {
           referrer_id: inviter.id,
@@ -543,8 +579,18 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           referred_username: username
         });
 
+        // If RPC returns an error object (network/PG error), try to map duplicate -> already_referred
         if (rpcErr) {
           console.error('manual_refer_by_id rpc error (refer by username):', rpcErr);
+
+          const lowerMsg = (rpcErr?.message || '').toString().toLowerCase();
+          const details = (rpcErr?.details || '').toString().toLowerCase();
+
+          if (lowerMsg.includes('duplicate') || lowerMsg.includes('unique') || details.includes('already') || rpcErr?.code === '23505') {
+            await sendTelegram(chatId, "⚠️ You have already been referred or the referral already exists.");
+            return res.json({ ok: false, error: 'already_referred' });
+          }
+
           await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
           return res.json({ ok: false, error: rpcErr.message || rpcErr });
         }
@@ -585,6 +631,39 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
         }
 
         try {
+          // ensure referred user exists (upsert) first to avoid duplicate insert errors
+          try {
+            await supabase.from('users').upsert([{
+              id: tgId,
+              username,
+              coins: 100,
+              businesses: {},
+              level: 1,
+              last_mine: 0,
+              referrals_count: 0,
+              referred_by: null,
+              subscribed: true
+            }], { onConflict: 'id' });
+          } catch (e) {
+            console.warn('upsert referred user failed (start flow)', e?.message || e);
+          }
+
+          // quick guard: check if already referred
+          try {
+            const { data: existingRef, error: refErr } = await supabase
+              .from('users')
+              .select('referred_by')
+              .eq('id', tgId)
+              .maybeSingle();
+            if (refErr) throw refErr;
+            if (existingRef && existingRef.referred_by) {
+              await sendTelegram(chatId, "⚠️ You have already been referred and can't be referred again.");
+              return res.json({ ok: false, error: 'already_referred' });
+            }
+          } catch (e) {
+            console.warn('referred check failed (start)', e?.message || e);
+          }
+
           const { data: rpcData, error: rpcErr } = await supabase.rpc('manual_refer_by_id', {
             referrer_id: referrerId,
             referred_id: tgId,
@@ -593,28 +672,29 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
 
           if (rpcErr) {
             console.error('manual_refer_by_id rpc error (start flow):', rpcErr);
-            // fallback: ensure user exists to avoid repeating join problems
+
+            const lowerMsg = (rpcErr?.message || '').toString().toLowerCase();
+            const details = (rpcErr?.details || '').toString().toLowerCase();
+            if (lowerMsg.includes('duplicate') || lowerMsg.includes('unique') || details.includes('already') || rpcErr?.code === '23505') {
+              await sendTelegram(chatId, "⚠️ You have already been referred or the referral already exists.");
+              return res.json({ ok: false, error: 'already_referred' });
+            }
+
+            // fallback: ensure user exists to avoid repeating join problems (use upsert)
             try {
-              const { data: existing } = await supabase
-                .from('users')
-                .select('id')
-                .eq('id', tgId)
-                .maybeSingle();
-              if (!existing) {
-                await supabase.from('users').insert([{
-                  id: tgId,
-                  username,
-                  coins: 100,
-                  businesses: {},
-                  level: 1,
-                  last_mine: 0,
-                  referrals_count: 0,
-                  referred_by: null,
-                  subscribed: false
-                }]);
-              }
+              await supabase.from('users').upsert([{
+                id: tgId,
+                username,
+                coins: 100,
+                businesses: {},
+                level: 1,
+                last_mine: 0,
+                referrals_count: 0,
+                referred_by: null,
+                subscribed: true
+              }], { onConflict: 'id' });
             } catch (e) {
-              console.warn('create fallback user failed', e?.message || e);
+              console.warn('create fallback user failed (start) after rpcErr', e?.message || e);
             }
 
             await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
@@ -652,17 +732,12 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           return res.json({ ok: false, error: err?.message || err });
         }
       } else {
-        // plain /start -> ensure user exists
+        // plain /start -> ensure user exists (use upsert to be idempotent)
         if (tgId) {
           try {
             const usernameSafe = username;
-            const { data: existing } = await supabase
-              .from('users')
-              .select('id')
-              .eq('id', tgId)
-              .maybeSingle();
-            if (!existing) {
-              await supabase.from('users').insert([{
+            try {
+              await supabase.from('users').upsert([{
                 id: tgId,
                 username: usernameSafe,
                 coins: 100,
@@ -671,8 +746,11 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
                 last_mine: 0,
                 referrals_count: 0,
                 referred_by: null,
-                subscribed: false
-              }]);
+                // NEW: default to subscribed = true
+                subscribed: true
+              }], { onConflict: 'id' });
+            } catch (e) {
+              console.warn('create user on plain /start failed (upsert)', e?.message || e);
             }
           } catch (e) {
             console.warn('create user on plain /start failed', e?.message || e);
