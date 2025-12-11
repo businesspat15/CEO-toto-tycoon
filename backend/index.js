@@ -1,3 +1,4 @@
+// index.js - Full server with referral, broadcast, purchase, mining, leaderboard
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -71,7 +72,7 @@ function mapRowToUser(row) {
     lastMine: row.last_mine ?? 0,
     referralsCount: row.referrals_count ?? 0,
     referredBy: row.referred_by ?? null,
-    subscribed: row.subscribed ?? true, // default true on read if null
+    subscribed: row.subscribed ?? false,
     createdAt: row.created_at ?? null
   };
 }
@@ -143,7 +144,7 @@ app.post('/api/user', async (req, res) => {
       last_mine: 0,
       referrals_count: 0,
       referred_by: null,
-      subscribed: true, // <--- notifications ON by default
+      subscribed: false,
     };
 
     const { data: created, error: upsertErr } = await supabase
@@ -345,73 +346,6 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
     const username = from.username || `${from.first_name || 'tg'}_${tgId}`;
     const chatId = msg.chat?.id?.toString() || tgId;
 
-    // -------------------------
-    // New: allow users to toggle notifications
-    // -------------------------
-    if (text === '/notify_off') {
-      if (!tgId) {
-        await sendTelegram(chatId, 'Error: cannot identify user.');
-        return res.json({ ok: false });
-      }
-      try {
-        const { error } = await supabase
-          .from('users')
-          .update({ subscribed: false })
-          .eq('id', tgId);
-
-        if (error) throw error;
-        await sendTelegram(chatId, '🔕 Notifications disabled. You will no longer receive broadcasts.');
-        return res.json({ ok: true });
-      } catch (err) {
-        console.error('/notify_off error', err);
-        await sendTelegram(chatId, '⚠️ Failed to update notification settings. Try again later.');
-        return res.json({ ok: false, error: err?.message || err });
-      }
-    }
-
-    if (text === '/notify_on') {
-      if (!tgId) {
-        await sendTelegram(chatId, 'Error: cannot identify user.');
-        return res.json({ ok: false });
-      }
-      try {
-        // ensure user exists and set subscribed = true
-        const { data: existing } = await supabase
-          .from('users')
-          .select('id')
-          .eq('id', tgId)
-          .maybeSingle();
-
-        if (!existing) {
-          // create user with subscribed true
-          await supabase.from('users').insert([{
-            id: tgId,
-            username,
-            coins: 100,
-            businesses: {},
-            level: 1,
-            last_mine: 0,
-            referrals_count: 0,
-            referred_by: null,
-            subscribed: true
-          }]);
-        } else {
-          const { error } = await supabase
-            .from('users')
-            .update({ subscribed: true })
-            .eq('id', tgId);
-          if (error) throw error;
-        }
-
-        await sendTelegram(chatId, '🔔 Notifications enabled. You will receive broadcasts.');
-        return res.json({ ok: true });
-      } catch (err) {
-        console.error('/notify_on error', err);
-        await sendTelegram(chatId, '⚠️ Failed to update notification settings. Try again later.');
-        return res.json({ ok: false, error: err?.message || err });
-      }
-    }
-
     // ---------- Broadcast preview & callbacks ----------
     if (text && text.startsWith('/broadcast_preview ')) {
       if (!ADMIN_ID || String(chatId) !== String(ADMIN_ID)) {
@@ -484,7 +418,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ callback_query_id: callbackQuery.id, text: 'Broadcasting to subscribers...' })
           });
-        } catch (e){}
+        } catch(e){}
 
         // Fetch subscribers and broadcast
         try {
@@ -676,7 +610,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
                   last_mine: 0,
                   referrals_count: 0,
                   referred_by: null,
-                  subscribed: true // <--- default ON in fallback insert
+                  subscribed: false
                 }]);
               }
             } catch (e) {
@@ -737,7 +671,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
                 last_mine: 0,
                 referrals_count: 0,
                 referred_by: null,
-                subscribed: true // <--- notifications ON by default for plain /start
+                subscribed: false
               }]);
             }
           } catch (e) {
