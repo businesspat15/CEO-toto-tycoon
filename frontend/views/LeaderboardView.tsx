@@ -69,7 +69,7 @@ const LeaderboardView: React.FC<LeaderboardViewProps> = ({ user }) => {
     <div className="h-full px-4 pt-8 pb-24 overflow-y-auto bg-slate-900">
       <div className="flex flex-col items-center mb-8">
         <h2 className="text-2xl font-bold text-white mb-2">Leaderboard 🏆</h2>
-        <p className="text-slate-400 text-sm">Top CEOs of TOTO Tycoon</p>
+        <p className="text-slate-400 text-sm">Top CEOs of CEOTOTO Tycoon</p>
       </div>
 
       <div className="bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">
