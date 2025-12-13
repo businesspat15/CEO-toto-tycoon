@@ -21,5 +21,5 @@ export const getLevelLabel = (coins: number): string => {
 };
 
 export const formatNumber = (n: number): string => {
-  return n.toLocaleString("en-IN");
+  return n.toString();
 };

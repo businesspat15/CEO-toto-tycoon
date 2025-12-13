@@ -265,7 +265,7 @@ app.post('/api/mine', async (req, res) => {
       return res.status(429).json({ error: 'cooldown', retryAfterMs });
     }
 
-    const earned = Math.floor(Math.random() * 1) + 1;
+    const earned = Math.floor(Math.random() * 1) + 0;
     const passive = calculatePassiveIncome(data.businesses || {});
     const newCoins = (Number(data.coins) || 0) + earned + passive;
 
