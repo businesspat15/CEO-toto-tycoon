@@ -1,4 +1,4 @@
-// index.js - Full server with referral, broadcast, purchase, mining, leaderboard
+// index.js - Full server
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -17,6 +17,7 @@ const BROADCAST_DELAY_MS = parseInt(process.env.BROADCAST_DELAY_MS || '200', 10)
 const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || null;
 const RAW_FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '';
 const FRONTEND_ORIGIN = RAW_FRONTEND_ORIGIN.replace(/\/$/, '');
+const BOT_USERNAME_FALLBACK = process.env.BOT_USERNAME || null; // optional env fallback
 
 // sanity check env
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
@@ -31,7 +32,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { pers
 const app = express();
 app.set('trust proxy', 1);
 
-// CORS + preflight
 app.use(cors({
   origin: ["http://localhost:5173", FRONTEND_ORIGIN].filter(Boolean),
   methods: "GET,POST,PATCH,PUT,DELETE,OPTIONS",
@@ -84,9 +84,7 @@ function escapeHtml(text = '') {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 }
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 // Send a message via Bot API (simple, uses fetch)
 async function sendTelegram(chat, textMsg, opts = {}) {
@@ -97,7 +95,6 @@ async function sendTelegram(chat, textMsg, opts = {}) {
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     const payload = { chat_id: chat, text: textMsg, ...opts };
-    // Telegram expects reply_markup as JSON string if provided
     if (payload.reply_markup && typeof payload.reply_markup !== 'string') {
       payload.reply_markup = JSON.stringify(payload.reply_markup);
     }
@@ -111,12 +108,37 @@ async function sendTelegram(chat, textMsg, opts = {}) {
   }
 }
 
-// ---- RPC helper: manual_refer_by_id with defensive logging ----
+// get bot username (cached)
+let _cachedBotUsername = null;
+async function getBotUsername() {
+  if (_cachedBotUsername) return _cachedBotUsername;
+  if (BOT_USERNAME_FALLBACK) {
+    _cachedBotUsername = BOT_USERNAME_FALLBACK;
+    return _cachedBotUsername;
+  }
+  if (!TELEGRAM_BOT_TOKEN) return null;
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
+    const json = await resp.json();
+    if (json?.ok && json.result?.username) {
+      _cachedBotUsername = json.result.username;
+      return _cachedBotUsername;
+    }
+  } catch (e) {
+    console.warn('getBotUsername failed', e?.message || e);
+  }
+  return null;
+}
+
+// ---- RPC helper: manual_refer_by_id with defensive logging + id normalization ----
 async function callManualRefer(referrerId, referredId, referredUsername) {
   try {
+    const normReferrerId = (typeof referrerId === 'string' && /^\d+$/.test(referrerId)) ? Number(referrerId) : referrerId;
+    const normReferredId = (typeof referredId === 'string' && /^\d+$/.test(referredId)) ? Number(referredId) : referredId;
+
     const { data, error } = await supabase.rpc('manual_refer_by_id', {
-      referrer_id: referrerId,
-      referred_id: referredId,
+      referrer_id: normReferrerId,
+      referred_id: normReferredId,
       referred_username: referredUsername
     });
 
@@ -136,6 +158,55 @@ async function callManualRefer(referrerId, referredId, referredUsername) {
     console.error('manual_refer_by_id call failed:', e);
     return { ok: false, error: e };
   }
+}
+
+// robust finding of a user by username or id (case-insensitive on username)
+async function findUserByUsernameOrId(target) {
+  if (!target) return null;
+  const cleaned = target.replace(/^@/, '').trim();
+
+  // 1) exact match
+  try {
+    const { data: exactRows, error: exactErr } = await supabase
+      .from('users')
+      .select('id, username')
+      .eq('username', cleaned)
+      .limit(1);
+    if (exactErr) throw exactErr;
+    if (exactRows && exactRows.length > 0) return exactRows[0];
+  } catch (e) {
+    console.warn('findUser exact match failed', e?.message || e);
+  }
+
+  // 2) ilike
+  try {
+    const { data: ilikeRows, error: ilikeErr } = await supabase
+      .from('users')
+      .select('id, username')
+      .ilike('username', cleaned)
+      .limit(1);
+    if (ilikeErr) throw ilikeErr;
+    if (ilikeRows && ilikeRows.length > 0) return ilikeRows[0];
+  } catch (e) {
+    console.warn('findUser ilike match failed', e?.message || e);
+  }
+
+  // 3) id match if numeric
+  if (/^\d+$/.test(cleaned)) {
+    try {
+      const { data: idRows, error: idErr } = await supabase
+        .from('users')
+        .select('id, username')
+        .eq('id', cleaned)
+        .limit(1);
+      if (idErr) throw idErr;
+      if (idRows && idRows.length > 0) return idRows[0];
+    } catch (e) {
+      console.warn('findUser id match failed', e?.message || e);
+    }
+  }
+
+  return null;
 }
 
 // ---- API routes (user, mine, update, leaderboard, buy) ----
@@ -265,7 +336,7 @@ app.post('/api/mine', async (req, res) => {
       return res.status(429).json({ error: 'cooldown', retryAfterMs });
     }
 
-    const earned = Math.floor(Math.random() * 0) + 1;
+    const earned = Math.floor(Math.random() * 3) + 1; // 1-3 coins (adjust)
     const passive = calculatePassiveIncome(data.businesses || {});
     const newCoins = (Number(data.coins) || 0) + earned + passive;
 
@@ -353,7 +424,7 @@ app.get('/api/leaderboard', async (req, res) => {
 // Health
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// ---- Telegram webhook handler (referral, refer, broadcast preview/send, broadcast) ----
+// ---- Telegram webhook handler ----
 app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` : ''}`, async (req, res) => {
   try {
     const body = req.body;
@@ -361,7 +432,6 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
 
     console.log('telegram webhook body:', JSON.stringify(body));
 
-    // Support message or edited_message or callback_query
     const msg = body.message || body.edited_message || body.callback_query?.message;
     if (!msg) return res.sendStatus(204);
 
@@ -449,7 +519,6 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
 
         // Fetch subscribers and broadcast
         try {
-          // Users with subscribed = true will receive broadcasts. New users default to subscribed=true.
           const { data: users, error: usersErr } = await supabase
             .from('users')
             .select('id')
@@ -529,14 +598,8 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
     if (text && (text.startsWith('/refer') || text === 'Refer 🎁')) {
       // /refer (no args) -> return referral link
       if (!(text.startsWith('/refer ') || /^\/refer@/i.test(text))) {
-        // get bot username
-        let botUsername = null;
-        try {
-          const resp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
-          const json = await resp.json();
-          if (json?.ok) botUsername = json.result.username;
-        } catch (e) {}
-        const referralLink = botUsername ? `https://t.me/${botUsername}?start=ref_${chatId}` : `https://t.me/${chatId}?start=ref_${chatId}`;
+        let botUsername = await getBotUsername();
+        const referralLink = botUsername ? `https://t.me/${botUsername}?start=ref_${chatId}` : `https://t.me/${BOT_USERNAME_FALLBACK || 'your_bot_username'}?start=ref_${chatId}`;
         await sendTelegram(chatId, `🎁 <b>Your Referral Link</b>\nInvite your friends and earn <b>100 coins</b> per referral!\n\n🔗 ${referralLink}`, { parse_mode: 'HTML' });
         return res.json({ ok: true });
       }
@@ -550,19 +613,31 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
       }
 
       try {
-        // find inviter id by username (case-insensitive)
-        const { data: rows, error: findErr } = await supabase
-          .from('users')
-          .select('id, username')
-          .ilike('username', targetUsername)
-          .limit(1);
+        // If the clicking user already exists -> inform and stop
+        try {
+          const { data: existingUser, error: existingErr } = await supabase
+            .from('users')
+            .select('id')
+            .eq('id', tgId)
+            .maybeSingle();
 
-        if (findErr) throw findErr;
-        if (!rows || rows.length === 0) {
+          if (existingErr) {
+            console.warn('Error checking existing user before referral:', existingErr);
+          } else if (existingUser) {
+            await sendTelegram(chatId, 'You already is user');
+            return res.json({ ok: false, error: 'already_registered' });
+          }
+        } catch (e) {
+          console.warn('Check user existence failed (refer cmd):', e?.message || e);
+        }
+
+        // find inviter by username or id
+        const inviter = await findUserByUsernameOrId(targetUsername);
+
+        if (!inviter) {
           await sendTelegram(chatId, '❌ Inviter not found in database.');
           return res.json({ ok: false });
         }
-        const inviter = rows[0];
 
         // Call RPC (function handles creation and idempotency)
         const { ok, result, error } = await callManualRefer(inviter.id, tgId, username);
@@ -573,7 +648,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
         }
 
         if (result.success === true) {
-          await sendTelegram(chatId, `🎁 You were successfully referred by <b>${result.inviter_username || targetUsername}</b>!`, { parse_mode: 'HTML' });
+          await sendTelegram(chatId, `🎁 You were successfully referred by <b>${result.inviter_username || inviter.username || targetUsername}</b>!`, { parse_mode: 'HTML' });
           try { if (result.inviter_id && result.awarded) await sendTelegram(result.inviter_id, `🎉 <b>${escapeHtml(username)}</b> joined using your referral!\nYou received +100 💰 coins.`, { parse_mode: 'HTML' }); } catch(e){}
           return res.json({ ok: true, result });
         } else {
@@ -581,6 +656,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           if (errCode === 'inviter_not_found') await sendTelegram(chatId, '❌ Inviter not found in database.');
           else if (errCode === 'self_referral') await sendTelegram(chatId, '😅 You can’t refer yourself!');
           else if (errCode === 'already_referred') await sendTelegram(chatId, "⚠️ You have already been referred or referral couldn't be recorded.");
+          else if (errCode === 'already_registered') await sendTelegram(chatId, 'You already is user');
           else await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
           return res.json({ ok: false, error: errCode });
         }
@@ -595,15 +671,33 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
     if (text && text.startsWith('/start')) {
       const parts = text.split(/\s+/);
       if (parts[1] && parts[1].startsWith('ref_')) {
-        const referrerId = parts[1].replace('ref_', '').trim();
+        const referrerIdRaw = parts[1].replace('ref_', '').trim();
 
         if (!tgId) {
           return res.json({ ok: false, error: 'no tg id' });
         }
 
+        // Check if clicking user already exists -> send "You already is user"
+        try {
+          const { data: existingUser, error: existingErr } = await supabase
+            .from('users')
+            .select('id')
+            .eq('id', tgId)
+            .maybeSingle();
+
+          if (existingErr) {
+            console.warn('Error checking existing user before referral (start):', existingErr);
+          } else if (existingUser) {
+            await sendTelegram(chatId, 'You already is user');
+            return res.json({ ok: false, error: 'already_registered' });
+          }
+        } catch (e) {
+          console.warn('Check user existence failed (start ref):', e?.message || e);
+        }
+
         try {
           // Call RPC (function handles creation and idempotency)
-          const { ok, result, error } = await callManualRefer(referrerId, tgId, username);
+          const { ok, result, error } = await callManualRefer(referrerIdRaw, tgId, username);
           if (!ok) {
             console.error('callManualRefer failed', error);
             await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
@@ -611,7 +705,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           }
 
           if (result.success === true) {
-            await sendTelegram(chatId, `🎁 You were successfully referred by <b>${result.inviter_username || referrerId}</b>!`, { parse_mode: 'HTML' });
+            await sendTelegram(chatId, `🎁 You were successfully referred by <b>${result.inviter_username || referrerIdRaw}</b>!`, { parse_mode: 'HTML' });
             try { if (result.inviter_id && result.awarded) await sendTelegram(result.inviter_id, `🎉 <b>${escapeHtml(username)}</b> joined using your referral!\nYou received +100 💰 coins.`, { parse_mode: 'HTML' }); } catch (e) {}
             return res.json({ ok: true, result });
           } else {
@@ -619,6 +713,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
             if (errCode === 'inviter_not_found') await sendTelegram(chatId, '❌ Inviter not found in database.');
             else if (errCode === 'self_referral') await sendTelegram(chatId, '😅 You can’t refer yourself!');
             else if (errCode === 'already_referred') await sendTelegram(chatId, "⚠️ You have already been referred or referral couldn't be recorded.");
+            else if (errCode === 'already_registered') await sendTelegram(chatId, 'You already is user');
             else await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
             return res.json({ ok: false, error: errCode });
           }
