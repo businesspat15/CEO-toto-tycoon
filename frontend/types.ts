@@ -1,6 +1,6 @@
 export enum Tab {
   MINE = 'Mine',
-  LEADERBOARD = 'Leaderboard',
+  LEADERBOARD = 'NetworkView',
   UPGRADE = 'Asset',
   TEAM = 'Team',
   ME = 'Me'

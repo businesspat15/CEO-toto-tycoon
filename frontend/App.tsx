@@ -4,7 +4,7 @@ import { UserState, Tab } from './types';
 import { BUSINESSES, MINE_COOLDOWN_MS } from './constants';
 import BottomNav from './components/BottomNav';
 import MineView from './views/MineView';
-import LeaderboardView from './views/LeaderboardView';
+import NetworkView from './views/NetworkView';
 import UpgradeView from './views/UpgradeView';
 import TeamView from './views/TeamView';
 import MeView from './views/MeView';
@@ -103,8 +103,8 @@ const App: React.FC = () => {
     switch (activeTab) {
       case Tab.MINE:
         return <MineView user={user} onMine={handleMine} />;
-      case Tab.LEADERBOARD:
-        return <LeaderboardView user={user} />;
+      case Tab.NETWORK:
+        return <NetworkView user={user} />;
       case Tab.UPGRADE:
         return <UpgradeView user={user} onBuy={handleBuyBusiness} />;
       case Tab.TEAM:
@@ -121,8 +121,8 @@ const App: React.FC = () => {
     return (
       <div className="w-full h-screen bg-slate-900 flex flex-col items-center justify-center text-white">
         <div className="w-16 h-16 border-4 border-lime-500/30 border-t-lime-500 rounded-full animate-spin mb-4"></div>
-        <h2 className="text-xl font-bold animate-pulse">Loading Empire...</h2>
-        <p className="text-slate-400 text-sm mt-2">Connecting to blockchain</p>
+        <h2 className="text-xl font-bold animate-pulse">Welcome to CIFCI TOTO...</h2>
+        <p className="text-slate-400 text-sm mt-2">Connecting to Server</p>
       </div>
     );
   }

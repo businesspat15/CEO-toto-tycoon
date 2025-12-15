@@ -1,6 +1,6 @@
 import React from 'react';
 import { Tab } from '../types';
-import { IconPickaxe, IconTrophy, IconBuilding, IconBox, IconUsers } from './Icons';
+import { IconPickaxe, IconGlobe, IconBuilding, IconBox, IconUsers } from './Icons';
 
 interface BottomNavProps {
   currentTab: Tab;
@@ -10,7 +10,7 @@ interface BottomNavProps {
 const BottomNav: React.FC<BottomNavProps> = ({ currentTab, onTabChange }) => {
   const navItems = [
     { id: Tab.MINE, label: 'Mine', icon: IconPickaxe },
-    { id: Tab.LEADERBOARD, label: 'Leaderboard', icon: IconTrophy },
+    { id: Tab.NETWORK, label: 'Network', icon: IconGlobe },
     { id: Tab.UPGRADE, label: 'Asset', icon: IconBuilding },
     { id: Tab.TEAM, label: 'Team', icon: IconUsers },
     { id: Tab.ME, label: 'Me', icon: IconBox },
