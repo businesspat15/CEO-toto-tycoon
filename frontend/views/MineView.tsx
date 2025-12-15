@@ -176,7 +176,7 @@ const MineView: React.FC<MineViewProps> = ({ user, onMine }) => {
              </div>
              <div className="flex flex-col items-start">
                <span className="text-indigo-300 text-[10px] font-bold uppercase tracking-wider">Sponsored</span>
-               <span className="text-white font-bold text-sm group-hover:text-indigo-200 transition-colors">Watch Ads</span>
+               <span className="text-white font-bold text-sm group-hover:text-indigo-200 transition-colors">Watch channel Ads</span>
              </div>
            </div>
 

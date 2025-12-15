@@ -89,7 +89,7 @@ const NetworkView: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <span className="font-mono font-bold text-lg text-white">
-            {formatNumber(totalCoins)} coins
+            {formatNumber(totalCoins)}
           </span>
 
           <span className="flex items-center gap-1 text-xs font-semibold text-lime-400">
