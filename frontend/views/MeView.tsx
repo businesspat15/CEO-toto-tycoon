@@ -86,9 +86,9 @@ const MeView: React.FC<MeViewProps> = ({ user, onSubscribeToggle }) => {
         </div>
 
         <div className="mt-8 text-center">
-            <a href="#" className="text-indigo-400 text-sm hover:text-indigo-300">Patience</a>
+            <a href="https://www.cifcitoto.com/policy" className="text-indigo-400 text-sm hover:text-indigo-300">Terms of Service</a>
             <span className="mx-2 text-slate-600">•</span>
-            <a href="#" className="text-indigo-400 text-sm hover:text-indigo-300">Purpose</a>
+            <a href="https://www.cifcitoto.com/policy" className="text-indigo-400 text-sm hover:text-indigo-300">Privacy Policy</a>
             <div className="mt-4 text-xs text-slate-600">
                 v1.0.1 • CEO TOTO Tycoon
             </div>
