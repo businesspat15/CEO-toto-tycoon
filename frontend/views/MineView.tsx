@@ -62,10 +62,7 @@ const MineView: React.FC<MineViewProps> = ({ user, onMine }) => {
     }
   };
 
-  const handleAdClick = () => {
-    // In a real implementation, this would trigger an ad provider
-    alert("Ad Video Placeholder: Watching ad for boost...");
-  };
+ 
 
   return (
     <div className="flex flex-col items-center h-full px-4 pt-8 pb-24 overflow-y-auto bg-gradient-to-b from-slate-900 to-slate-800">
@@ -162,32 +159,7 @@ const MineView: React.FC<MineViewProps> = ({ user, onMine }) => {
       </div>
 
       {/* Advertisement Block */}
-      <div className="w-full max-w-sm mt-6">
-        <button 
-          onClick={handleAdClick}
-          className="relative w-full overflow-hidden bg-gradient-to-r from-indigo-900/60 to-slate-800 border border-indigo-500/30 rounded-xl p-4 flex items-center justify-between shadow-lg cursor-pointer hover:border-indigo-400 transition-all group active:scale-[0.98]"
-        >
-           {/* Decorative Blur */}
-           <div className="absolute -right-8 -top-8 w-24 h-24 bg-indigo-500/20 rounded-full blur-2xl pointer-events-none"></div>
-
-           <div className="flex items-center gap-4 relative z-10">
-             <div className="w-10 h-10 bg-indigo-500/20 rounded-lg flex items-center justify-center text-xl shadow-inner border border-indigo-500/20">
-               📺
-             </div>
-             <div className="flex flex-col items-start">
-               <span className="text-indigo-300 text-[10px] font-bold uppercase tracking-wider">Sponsored</span>
-               <span className="text-white font-bold text-sm group-hover:text-indigo-200 transition-colors">Watch channel Ads</span>
-             </div>
-           </div>
-
-           <div className="relative z-10 bg-slate-700/50 p-2 rounded-full text-indigo-300 group-hover:text-white group-hover:bg-indigo-500 transition-colors">
-             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-               <path d="M5 12h14"/>
-               <path d="m12 5 7 7-7 7"/>
-             </svg>
-           </div>
-        </button>
-      </div>
+      
     </div>
   );
 };
