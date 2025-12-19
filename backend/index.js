@@ -421,6 +421,48 @@ app.get('/api/leaderboard', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/network-stats
+ * Returns total coins, coins 24h ago, active miners
+ */
+app.get('/api/network-stats', async (req, res) => {
+  try {
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    // 1. Total coins now
+    const { data: allUsers, error: errNow } = await supabase
+      .from('users')
+      .select('id, coins');
+    if (errNow) throw errNow;
+
+    const totalCoins = allUsers.reduce((sum, u) => sum + (u.coins || 0), 0);
+    const activeMiners = allUsers.length;
+
+    // 2. Coins 24h ago
+    // Supabase doesn't store historical coins, so we calculate using created_at + last_mine
+    // We'll estimate coins 24h ago as sum of users whose createdAt <= yesterday
+    const { data: oldUsers, error: errOld } = await supabase
+      .from('users')
+      .select('id, coins, created_at')
+      .lte('created_at', yesterday.toISOString());
+    if (errOld) throw errOld;
+
+    // naive approximation: subtract coins mined in last 24h (optional: depends on your DB schema)
+    const coins24hAgo = oldUsers.reduce((sum, u) => sum + (u.coins || 0), 0);
+
+    return res.json({
+      totalCoins,
+      coins24hAgo,
+      activeMiners
+    });
+  } catch (err) {
+    console.error('/api/network-stats', err);
+    return res.status(500).json({ error: err?.message || 'server error' });
+  }
+});
+
+
 // Health
 app.get('/health', (req, res) => res.json({ ok: true }));
 
