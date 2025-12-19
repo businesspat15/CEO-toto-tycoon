@@ -13,7 +13,7 @@ const API_BASE =
 const NetworkView: React.FC = () => {
   const [users, setUsers] = useState<ApiUser[]>([]);
   const [totalCoins, setTotalCoins] = useState(0);
-  const [coins24hAgo, setCoins24hAgo] = useState(0);
+  const [prev24hCoins, setPrev24hCoins] = useState(0);
   const [loading, setLoading] = useState(false);
 
   // Fetch network data
@@ -55,7 +55,7 @@ const NetworkView: React.FC = () => {
       aborted = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [prev24hCoins]);
 
   /* ---------------- Metrics ---------------- */
 
