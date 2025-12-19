@@ -1,4 +1,4 @@
- // index.js - Full server 
+// index.js - Full server
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -655,7 +655,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
       }
 
       try {
-        // If the clicking user already exists -> inform and stop
+        // If the clicking user already exists -> inform and stop (do NOT call RPC)
         try {
           const { data: existingUser, error: existingErr } = await supabase
             .from('users')
@@ -666,8 +666,8 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           if (existingErr) {
             console.warn('Error checking existing user before referral:', existingErr);
           } else if (existingUser) {
-            await sendTelegram(chatId, 'You already is user');
-            return res.json({ ok: false, error: 'already_registered' });
+            await sendTelegram(chatId, '👋 You are already registered. Referrals apply only to new users.');
+            return res.json({ ok: true });
           }
         } catch (e) {
           console.warn('Check user existence failed (refer cmd):', e?.message || e);
@@ -698,7 +698,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           if (errCode === 'inviter_not_found') await sendTelegram(chatId, '❌ Inviter not found in database.');
           else if (errCode === 'self_referral') await sendTelegram(chatId, '😅 You can’t refer yourself!');
           else if (errCode === 'already_referred') await sendTelegram(chatId, "⚠️ You have already been referred or referral couldn't be recorded.");
-          else if (errCode === 'already_registered') await sendTelegram(chatId, 'You already is user');
+          else if (errCode === 'already_user') await sendTelegram(chatId, '👋 You already joined earlier.');
           else await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
           return res.json({ ok: false, error: errCode });
         }
@@ -719,7 +719,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           return res.json({ ok: false, error: 'no tg id' });
         }
 
-        // Check if clicking user already exists -> send "You already is user"
+        // Check if clicking user already exists -> send friendly welcome and stop (do NOT call RPC)
         try {
           const { data: existingUser, error: existingErr } = await supabase
             .from('users')
@@ -730,8 +730,8 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           if (existingErr) {
             console.warn('Error checking existing user before referral (start):', existingErr);
           } else if (existingUser) {
-            await sendTelegram(chatId, 'You already is user');
-            return res.json({ ok: false, error: 'already_registered' });
+            await sendTelegram(chatId, '👋 Welcome back! You are already registered.');
+            return res.json({ ok: true });
           }
         } catch (e) {
           console.warn('Check user existence failed (start ref):', e?.message || e);
@@ -755,7 +755,7 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
             if (errCode === 'inviter_not_found') await sendTelegram(chatId, '❌ Inviter not found in database.');
             else if (errCode === 'self_referral') await sendTelegram(chatId, '😅 You can’t refer yourself!');
             else if (errCode === 'already_referred') await sendTelegram(chatId, "⚠️ You have already been referred or referral couldn't be recorded.");
-            else if (errCode === 'already_registered') await sendTelegram(chatId, 'You already is user');
+            else if (errCode === 'already_user') await sendTelegram(chatId, '👋 You already joined earlier.');
             else await sendTelegram(chatId, '⚠️ Referral system error. Try again later.');
             return res.json({ ok: false, error: errCode });
           }
@@ -765,29 +765,41 @@ app.post(`/telegram/webhook${TELEGRAM_SECRET_PATH ? `/${TELEGRAM_SECRET_PATH}` :
           return res.json({ ok: false, error: err?.message || err });
         }
       } else {
-        // plain /start -> ensure user exists (use upsert to be idempotent)
+        // plain /start -> ensure user exists (safe insert-if-not-exists)
         if (tgId) {
           try {
-            const usernameSafe = username;
-            try {
-              await supabase.from('users').upsert([{
-                id: tgId,
-                username: usernameSafe,
-                coins: 100,
-                businesses: {},
-                level: 1,
-                last_mine: 0,
-                referrals_count: 0,
-                referred_by: null,
-                subscribed: true
-              }], { onConflict: 'id' });
-            } catch (e) {
-              console.warn('create user on plain /start failed (upsert)', e?.message || e);
+            // check first
+            const { data: existingUser } = await supabase
+              .from('users')
+              .select('id')
+              .eq('id', tgId)
+              .maybeSingle();
+
+            if (!existingUser) {
+              try {
+                await supabase.from('users').insert([{
+                  id: tgId,
+                  username,
+                  coins: 100,
+                  businesses: {},
+                  level: 1,
+                  last_mine: 0,
+                  referrals_count: 0,
+                  referred_by: null,
+                  subscribed: true
+                }]);
+              } catch (e) {
+                // Insert might fail if another process created the user concurrently — that's okay
+                console.warn('create user on plain /start failed (insert)', e?.message || e);
+              }
+            } else {
+              // existing user — do nothing
             }
           } catch (e) {
-            console.warn('create user on plain /start failed', e?.message || e);
+            console.warn('create user on plain /start failed (check/insert)', e?.message || e);
           }
         }
+        // Always respond OK for /start plain
         return res.json({ ok: true });
       }
     }
